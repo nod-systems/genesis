@@ -1,0 +1,6 @@
+{
+    "schemaVersion": 1,
+    "id": "base",
+    "name": "Diagnostic initial MSP",
+    "steps": ["inventory"]
+}

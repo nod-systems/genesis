@@ -1,0 +1,42 @@
+name: Validation publique
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - run: ruff check .
+      - run: python tools/package_genesis.py
+      - run: python tools/audit_public.py --staged
+      - run: git diff --exit-code -- Genesis-Portable.ps1 public-manifest.json
+      - run: git diff --check
+
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer les outils de test PowerShell
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+          Install-Module Pester -RequiredVersion 5.9.0 -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+      - name: Vérifier la syntaxe 5.1 et les tests Pester
+        shell: powershell
+        run: .\scripts\Test-Genesis.ps1
