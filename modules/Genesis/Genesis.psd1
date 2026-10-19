@@ -1,6 +1,6 @@
 ﻿@{
     RootModule = 'Genesis.psm1'
-    ModuleVersion = '0.5.20'
+    ModuleVersion = '1.0.0'
     GUID = '33d2e2d1-4f1b-4526-882c-cb90642ff40e'
     Author = 'Genesis contributors'
     Description = 'Socle de preparation Windows Genesis pour les techniciens MSP.'
@@ -11,7 +11,7 @@
         'Get-GenesisRun', 'Show-GenesisMenu', 'Show-GenesisPrinterMenu',
         'Get-GenesisNetworkPrinter', 'New-GenesisPrinterDriverSearchUrl', 'Open-GenesisPrinterDriverSearch', 'Add-GenesisPrinter', 'Get-GenesisProgress',
         'Undo-GenesisRun', 'New-GenesisTaskbarXml', 'Confirm-GenesisTaskbar',
-        'Register-GenesisUpdateContinuation', 'Invoke-GenesisUpdateContinuation'
+        'Register-GenesisUpdateContinuation', 'Invoke-GenesisUpdateContinuation', 'Invoke-GenesisUpdateWorker'
     )
     CmdletsToExport = @()
     VariablesToExport = @()
