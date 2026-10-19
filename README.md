@@ -2,7 +2,7 @@
 
 Outil PowerShell de préparation Windows, avec menu de sélection, progression,
 inventaire local, sauvegardes et retour arrière des réglages compatibles.
-Version actuelle : **0.5.19**.
+Version actuelle : **0.5.20**.
 
 ## Démarrer depuis Internet
 
@@ -51,6 +51,7 @@ consulter un plan sans appliquer de réglage :
 | Opération | Comportement |
 | --- | --- |
 | Windows Update | Rechercher et installer les mises à jour, les mises à jour facultatives et les pilotes proposés ; aucun redémarrage forcé |
+| Mise à niveau Windows | Installer la nouvelle version proposée par Windows Update (ex. 26H2) ; décochée par défaut, à choisir explicitement |
 | Explorateur | Ouvrir sur Ce PC |
 | Suggestions Windows | Masquer les conseils et propositions de finalisation |
 | Notification | Afficher les icônes déjà enregistrées dans la session |
@@ -98,6 +99,15 @@ relancer le programme puis reprendre avec cet identifiant :
 .\Genesis-Portable.ps1 -Action Undo -RunId IDENTIFIANT
 .\Genesis-Portable.ps1 -Action ConfirmTaskbar -RunId IDENTIFIANT
 ```
+
+Quand Windows Update demande un redémarrage à la fin d'une préparation lancée
+depuis le menu, Genesis propose de redémarrer et de poursuivre automatiquement.
+Une tâche planifiée `Genesis - reprise Windows Update`, exécutée par SYSTEM au
+démarrage, relance alors uniquement Windows Update et, si elle est sélectionnée, la mise à niveau de version, depuis une copie du programme
+dans `C:\ProgramData\Genesis\bin`, sans ouverture de session. Elle redémarre
+le poste tant que des mises à jour restent proposées, au plus 8 fois, puis se
+supprime et prévient les sessions ouvertes. Elle s'arrête aussi en cas d'échec
+ou si la préparation a été restaurée entre-temps.
 
 Le menu Reverse affiche les préparations restaurables. Les sauvegardes sont
 liées à la machine, au compte et à la version de Genesis qui les a créées.

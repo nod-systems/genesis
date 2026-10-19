@@ -2,5 +2,5 @@
     "schemaVersion": 1,
     "id": "windows",
     "name": "Personnalisations Windows",
-    "steps": ["windows-update", "explorer-home", "windows-suggestions", "tray-icons", "taskbar-controls", "time-sync", "office-2024", "browser", "pdf-reader", "outlook-autodiscover", "power-ac", "local-user", "netbird", "taskbar-pins"]
+    "steps": ["windows-update", "windows-feature-update", "explorer-home", "windows-suggestions", "tray-icons", "taskbar-controls", "time-sync", "office-2024", "browser", "pdf-reader", "outlook-autodiscover", "power-ac", "local-user", "netbird", "taskbar-pins"]
 }

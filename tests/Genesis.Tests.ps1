@@ -76,7 +76,11 @@ Describe 'Contrat des profils Genesis' {
 Describe 'Windows Update' {
     It 'utilise une recherche Windows Update incluant les mises a jour facultatives' {
         InModuleScope Genesis {
-            Get-GenesisWindowsUpdateSearchCriterion | Should -Be "IsInstalled=0 and IsHidden=0"
+            $criterion = Get-GenesisWindowsUpdateSearchCriterion
+            $criterion | Should -Match "DeploymentAction='OptionalInstallation'"
+            $criterion | Should -Match "DeploymentAction='Installation'"
+            $criterion | Should -Match 'IsHidden=0'
+
         }
     }
 
@@ -106,7 +110,7 @@ Describe 'Windows Update' {
             $searcher = [pscustomobject]@{}
             Add-Member -InputObject $searcher -MemberType ScriptMethod -Name Search -Value {
                 param([string]$Criteria)
-                if ($Criteria -ne 'IsInstalled=0 and IsHidden=0') { throw 'Critère de recherche inattendu.' }
+                if ($Criteria -notmatch "DeploymentAction='OptionalInstallation'") { throw 'Critère de recherche inattendu.' }
                 [pscustomobject]@{ Updates = @() }
             }
             $session = [pscustomobject]@{ Searcher = $searcher }
@@ -114,8 +118,82 @@ Describe 'Windows Update' {
             $result = Invoke-GenesisWindowsUpdate -RunDirectory $Root -Session $session
             $result.Status | Should -Be 'Completed'
             $journal = Get-Content (Join-Path $Root 'windows-update.json') -Raw | ConvertFrom-Json
-            $journal.SearchCriteria | Should -Be 'IsInstalled=0 and IsHidden=0'
+            $journal.SearchCriteria | Should -Match "DeploymentAction='OptionalInstallation'"
             $journal.PendingReboot | Should -BeFalse
+        }
+    }
+}
+
+Describe 'Mise a niveau de version Windows' {
+    BeforeAll {
+        $script:UpgradeCategory = '3689bdc8-b205-4af4-8d4a-a63924c5e9d5'
+        $script:SecurityCategory = '0fa1201d-4330-4fa8-8ae9-b877473b6441'
+    }
+
+    It 'separe les correctifs de la mise a niveau de version' {
+        InModuleScope Genesis -Parameters @{ Upgrade = $script:UpgradeCategory; Security = $script:SecurityCategory } {
+            param($Upgrade, $Security)
+            $updates = @(
+                [pscustomobject]@{ Title = 'Windows 11, version 26H2'; IsInstalled = $false; IsHidden = $false; Categories = @([pscustomobject]@{ CategoryID = $Upgrade }) }
+                [pscustomobject]@{ Title = '2026-10 Correctif de sécurité'; IsInstalled = $false; IsHidden = $false; Categories = @([pscustomobject]@{ CategoryID = $Security }) }
+                [pscustomobject]@{ Title = 'Pilote sans catégorie'; IsInstalled = $false; IsHidden = $false }
+            )
+            @(Select-GenesisWindowsUpdate -Updates $updates -Scope Feature).Title | Should -Be @('Windows 11, version 26H2')
+            @(Select-GenesisWindowsUpdate -Updates $updates -Scope Quality).Title | Should -Be @('2026-10 Correctif de sécurité', 'Pilote sans catégorie')
+        }
+    }
+
+    It 'propose la mise a niveau decochee par defaut dans la checklist' {
+        InModuleScope Genesis {
+            Test-GenesisStepSelectedByDefault -StepId 'windows-feature-update' | Should -BeFalse
+            Test-GenesisStepSelectedByDefault -StepId 'windows-update' | Should -BeTrue
+        }
+        $windowsProfile = Get-Content (Join-Path $script:Repository 'profiles/windows.json') -Raw | ConvertFrom-Json
+        $windowsProfile.steps[1] | Should -Be 'windows-feature-update'
+    }
+
+    It 'affiche la version proposee dans la checklist' {
+        InModuleScope Genesis {
+            Mock Get-GenesisWindowsVersionStatus {
+                [pscustomobject]@{ Current = 'Windows 11 25H2 (build 26200.9711)'; Latest = 'Windows 11, version 26H2'; FeatureUpdate = 'Windows 11, version 26H2'; AvailableCount = 0; ScanSucceeded = $true; Error = $null }
+            }
+            $status = Get-GenesisStepCompletion -StepId 'windows-feature-update'
+            $status.Done | Should -BeFalse
+            $status.Detail | Should -Match '26H2'
+            $status.LatestVersion | Should -Be 'Windows 11, version 26H2'
+        }
+    }
+
+    It 'installe uniquement la mise a niveau et journalise le redemarrage' -Tag Windows {
+        InModuleScope Genesis -Parameters @{ Root = $TestDrive; Upgrade = $script:UpgradeCategory; Security = $script:SecurityCategory } {
+            param($Root, $Upgrade, $Security)
+            Mock Set-GenesisStepProgress {}
+            $script:Installed = @()
+            Mock New-GenesisWindowsUpdateCollection { , (New-Object System.Collections.ArrayList) }
+            $upgrade = [pscustomobject]@{ Title = 'Windows 11, version 26H2'; IsInstalled = $false; IsHidden = $false; EulaAccepted = $true; Categories = @([pscustomobject]@{ CategoryID = $Upgrade }) }
+            $patch = [pscustomobject]@{ Title = 'Correctif'; IsInstalled = $false; IsHidden = $false; EulaAccepted = $true; Categories = @([pscustomobject]@{ CategoryID = $Security }) }
+            $session = [pscustomobject]@{ Updates = @($upgrade, $patch) }
+            Add-Member -InputObject $session -MemberType ScriptMethod -Name CreateUpdateSearcher -Value {
+                $searcher = [pscustomobject]@{ Updates = $this.Updates }
+                Add-Member -InputObject $searcher -MemberType ScriptMethod -Name Search -Value { [pscustomobject]@{ Updates = $this.Updates } }
+                $searcher
+            }
+            Add-Member -InputObject $session -MemberType ScriptMethod -Name CreateUpdateDownloader -Value {
+                $downloader = [pscustomobject]@{ Updates = $null }
+                Add-Member -InputObject $downloader -MemberType ScriptMethod -Name Download -Value { [pscustomobject]@{ ResultCode = 2 } }
+                $downloader
+            }
+            Add-Member -InputObject $session -MemberType ScriptMethod -Name CreateUpdateInstaller -Value {
+                $installer = [pscustomobject]@{ Updates = $null }
+                Add-Member -InputObject $installer -MemberType ScriptMethod -Name Install -Value { $script:Installed = @($this.Updates | ForEach-Object Title); [pscustomobject]@{ ResultCode = 2; RebootRequired = $true } }
+                $installer
+            }
+            $result = Invoke-GenesisWindowsUpdate -RunDirectory $Root -Session $session -Scope Feature
+            $result.Status | Should -Be 'NeedsAttention'
+            $script:Installed | Should -Be @('Windows 11, version 26H2')
+            $journal = Get-Content (Join-Path $Root 'windows-feature-update.json') -Raw | ConvertFrom-Json
+            $journal.Scope | Should -Be 'Feature'
+            $journal.PendingReboot | Should -BeTrue
         }
     }
 }
@@ -191,7 +269,7 @@ Describe 'Choix des preparations pour Reverse' {
             New-Item -Path $directory -ItemType Directory -Force | Out-Null
             $state = [pscustomobject]@{
                 SchemaVersion = 1
-                GenesisVersion = '0.5.19'
+                GenesisVersion = '0.5.20'
                 RunId = $runId
                 MachineId = 'machine-fictive'
                 UserSid = 'S-1-5-21-test'
@@ -568,5 +646,191 @@ Describe 'Imprimantes reseau et pilotes' {
             $result.Url | Should -Match 'Imprimante%20Exemple%20Pilote%20drivers'
             Should -Invoke Start-Process -Exactly -Times 1
         }
+    }
+}
+
+Describe 'Reprise de Windows Update apres redemarrage' {
+    BeforeAll {
+        function New-ContinuationRun {
+            param([string]$Root, [string]$RunStatus = 'NeedsAttention', [string]$UpdateStatus = 'NeedsAttention', [int]$Reboots = 0)
+            $runId = [guid]::NewGuid().ToString('N')
+            $directory = Join-Path (Join-Path $Root 'runs') $runId
+            New-Item -Path $directory -ItemType Directory -Force | Out-Null
+            $state = [pscustomobject]@{
+                SchemaVersion = 1; GenesisVersion = (Get-Module Genesis).Version.ToString(); RunId = $runId
+                MachineId = 'machine-fictive'; UserSid = 'S-1-5-21-technicien'; ProfileId = 'windows'
+                CreatedAt = '2026-10-19T08:00:00Z'; FinishedAt = '2026-10-19T08:30:00Z'; Status = $RunStatus; Choices = [ordered]@{}
+                Steps = @(
+                    [pscustomobject]@{ Id = 'windows-update'; Status = $UpdateStatus; Attempts = 1; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 100; Message = 'Redémarrage requis'; UndoStatus = 'NotAvailable' }
+                    [pscustomobject]@{ Id = 'explorer-home'; Status = 'Completed'; Attempts = 1; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 100; Message = ''; UndoStatus = 'Available' }
+                )
+            }
+            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $directory 'state.json') -Encoding UTF8
+            [pscustomobject]@{ SchemaVersion = 1; RunId = $runId; MachineId = 'machine-fictive'; Reboots = $Reboots; MaxReboots = 8; RegisteredAt = '2026-10-19T08:30:00Z'; FinishedAt = $null; Outcome = 'Scheduled' } |
+                ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'update-continuation.json') -Encoding UTF8
+            [pscustomobject]@{ RunId = $runId; Directory = $directory }
+        }
+    }
+
+    BeforeEach {
+        $script:DataRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        Mock Get-GenesisMachineId -ModuleName Genesis { 'machine-fictive' }
+        Mock Restart-GenesisComputer -ModuleName Genesis {}
+        Mock Unregister-GenesisUpdateContinuation -ModuleName Genesis {}
+        Mock Send-GenesisSessionMessage -ModuleName Genesis {}
+        Mock Test-GenesisUpdateRebootPending -ModuleName Genesis { $false }
+    }
+
+    It 'redemarre tant que Windows Update demande un redemarrage' {
+        $run = New-ContinuationRun -Root $script:DataRoot
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis { [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Redémarrage requis.' } }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Rebooting'
+        $result.Reboots | Should -Be 1
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 1
+        Should -Invoke Unregister-GenesisUpdateContinuation -ModuleName Genesis -Exactly -Times 0
+        (Get-Content (Join-Path $run.Directory 'update-continuation.json') -Raw | ConvertFrom-Json).Reboots | Should -Be 1
+        (Get-GenesisRun -RunId $run.RunId -DataRoot $script:DataRoot).Steps[0].Message | Should -Match '1/8'
+    }
+
+    It 'termine la preparation et supprime la tache quand Windows est a jour' {
+        $run = New-ContinuationRun -Root $script:DataRoot -Reboots 2
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis { [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Windows est à jour.' } }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Completed'
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 0
+        Should -Invoke Unregister-GenesisUpdateContinuation -ModuleName Genesis -Exactly -Times 1
+        Should -Invoke Send-GenesisSessionMessage -ModuleName Genesis -Exactly -Times 1 -ParameterFilter { $Message -match 'terminées après 2' }
+        $state = Get-GenesisRun -RunId $run.RunId -DataRoot $script:DataRoot
+        $state.Status | Should -Be 'Completed'
+        $state.Steps[0].Status | Should -Be 'Completed'
+    }
+
+    It 'reprend les correctifs puis la mise a niveau de version' {
+        $run = New-ContinuationRun -Root $script:DataRoot -UpdateStatus 'Completed'
+        $statePath = Join-Path $run.Directory 'state.json'
+        $state = Get-Content $statePath -Raw | ConvertFrom-Json
+        $state.Steps = @($state.Steps[0], [pscustomobject]@{ Id = 'windows-feature-update'; Status = 'NeedsAttention'; Attempts = 1; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 100; Message = 'Redémarrage requis'; UndoStatus = 'NotAvailable' }, $state.Steps[1])
+        $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        $script:Scopes = @()
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis {
+            $script:Scopes += $Scope
+            [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'À jour.' }
+        }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Completed'
+        $script:Scopes | Should -Be @('Quality', 'Feature')
+        $state = Get-GenesisRun -RunId $run.RunId -DataRoot $script:DataRoot
+        @($state.Steps | Where-Object Id -eq 'windows-feature-update')[0].Status | Should -Be 'Completed'
+        $state.Status | Should -Be 'Completed'
+    }
+
+    It 'redemarre avant la mise a niveau si les correctifs le demandent' {
+        $run = New-ContinuationRun -Root $script:DataRoot
+        $statePath = Join-Path $run.Directory 'state.json'
+        $state = Get-Content $statePath -Raw | ConvertFrom-Json
+        $state.Steps = @($state.Steps[0], [pscustomobject]@{ Id = 'windows-feature-update'; Status = 'Pending'; Attempts = 0; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 0; Message = ''; UndoStatus = 'NotAvailable' })
+        $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        $script:Scopes = @()
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis {
+            $script:Scopes += $Scope
+            [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Redémarrage requis.' }
+        }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Rebooting'
+        $script:Scopes | Should -Be @('Quality')
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 1
+    }
+
+    It 'arrete apres le nombre maximal de redemarrages' {
+        $run = New-ContinuationRun -Root $script:DataRoot -Reboots 8
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis { [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Redémarrage requis.' } }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'MaxReboots'
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 0
+        Should -Invoke Unregister-GenesisUpdateContinuation -ModuleName Genesis -Exactly -Times 1
+        (Get-GenesisRun -RunId $run.RunId -DataRoot $script:DataRoot).Status | Should -Be 'NeedsAttention'
+    }
+
+    It 'reessaie puis abandonne si Windows Update reste indisponible' {
+        $run = New-ContinuationRun -Root $script:DataRoot
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis { throw [System.Net.WebException]::new('Réseau indisponible') }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Failed'
+        Should -Invoke Invoke-GenesisWindowsUpdate -ModuleName Genesis -Exactly -Times 3
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 0
+        Should -Invoke Unregister-GenesisUpdateContinuation -ModuleName Genesis -Exactly -Times 1
+        $state = Get-GenesisRun -RunId $run.RunId -DataRoot $script:DataRoot
+        $state.Steps[0].Status | Should -Be 'Failed'
+        $state.Steps[0].ErrorType | Should -Be 'System.Net.WebException'
+    }
+
+    It 'ne relance rien pour une preparation restauree' {
+        $run = New-ContinuationRun -Root $script:DataRoot -RunStatus 'Restored'
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis { throw 'ne doit pas être appelé' }
+        $result = Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Stopped'
+        Should -Invoke Invoke-GenesisWindowsUpdate -ModuleName Genesis -Exactly -Times 0
+        Should -Invoke Unregister-GenesisUpdateContinuation -ModuleName Genesis -Exactly -Times 1
+    }
+
+    It 'supprime la tache si la preparation est illisible' {
+        $run = New-ContinuationRun -Root $script:DataRoot
+        Set-Content -LiteralPath (Join-Path $run.Directory 'state.json') -Value '{ invalide'
+        { Invoke-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot -RetryDelaySeconds 0 } | Should -Throw
+        Should -Invoke Unregister-GenesisUpdateContinuation -ModuleName Genesis -Exactly -Times 1
+    }
+
+    It 'exige le programme portable pour programmer la reprise' {
+        $run = New-ContinuationRun -Root $script:DataRoot
+        { Register-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot } | Should -Throw '*Genesis-Portable.ps1*'
+    }
+
+    It 'propose le redemarrage seulement si Windows Update est en attente' {
+        InModuleScope Genesis {
+            Mock Read-Host { 'O' }
+            Mock Write-Host {}
+            Mock Get-GenesisPortablePath { 'C:\Genesis\Genesis-Portable.ps1' }
+            Mock Register-GenesisUpdateContinuation {}
+            Mock Restart-GenesisComputer {}
+            $done = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'Completed' }) }
+            Request-GenesisUpdateRestart -State $done
+            Should -Invoke Read-Host -Exactly -Times 0
+            $pending = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'NeedsAttention' }) }
+            Request-GenesisUpdateRestart -State $pending
+            Should -Invoke Register-GenesisUpdateContinuation -Exactly -Times 1 -ParameterFilter { $RunId -eq ('a' * 32) }
+            Should -Invoke Restart-GenesisComputer -Exactly -Times 1
+        }
+    }
+
+    It 'ne redemarre pas si le technicien refuse' {
+        InModuleScope Genesis {
+            Mock Read-Host { 'N' }
+            Mock Write-Host {}
+            Mock Get-GenesisPortablePath { 'C:\Genesis\Genesis-Portable.ps1' }
+            Mock Register-GenesisUpdateContinuation {}
+            Mock Restart-GenesisComputer {}
+            $pending = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'NeedsAttention' }) }
+            Request-GenesisUpdateRestart -State $pending
+            Should -Invoke Register-GenesisUpdateContinuation -Exactly -Times 0
+            Should -Invoke Restart-GenesisComputer -Exactly -Times 0
+        }
+    }
+
+    It 'programme une tache SYSTEM au demarrage qui relance la copie protegee' -Tag Windows {
+        $run = New-ContinuationRun -Root $script:DataRoot
+        $script:TestPortable = Join-Path $TestDrive 'Genesis-Portable.ps1'
+        Set-Content -LiteralPath $script:TestPortable -Value '# portable fictif'
+        Mock Get-GenesisPortablePath -ModuleName Genesis { $script:TestPortable }
+        Mock Register-ScheduledTask -ModuleName Genesis { $script:RegisteredTask = $PSBoundParameters }
+        Register-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot | Out-Null
+        $copy = Join-Path (Join-Path $script:DataRoot 'bin') 'Genesis-Portable.ps1'
+        Test-Path -LiteralPath $copy | Should -BeTrue
+        Should -Invoke Register-ScheduledTask -ModuleName Genesis -Exactly -Times 1 -ParameterFilter {
+            ([System.Security.Principal.NTAccount]$Principal.UserId).Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-18' -and $Principal.RunLevel -eq 'Highest' -and
+            $Trigger[0].CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' -and
+            $Action[0].Arguments -like ('*-File "' + $copy + '" -Action ContinueUpdates -RunId ' + $run.RunId + '*')
+        }
+        (Get-Content (Join-Path $run.Directory 'update-continuation.json') -Raw | ConvertFrom-Json).Outcome | Should -Be 'Scheduled'
     }
 }

@@ -327,9 +327,30 @@ function Invoke-GenesisNativeCommand {
 function Get-GenesisWindowsUpdateSearchCriterion {
     [CmdletBinding()]
     param()
-    # Sans filtre de classification, Windows Update remonte aussi les mises à jour
-    # facultatives et les pilotes proposés par le fournisseur.
-    return 'IsInstalled=0 and IsHidden=0'
+    # Sans DeploymentAction explicite, Windows Update ne renvoie que les installations
+    # obligatoires : les mises à jour facultatives et les mises à niveau (ex. 26H2) sont
+    # proposées en OptionalInstallation.
+    return "IsInstalled=0 and IsHidden=0 and DeploymentAction='Installation' or IsInstalled=0 and IsHidden=0 and DeploymentAction='OptionalInstallation'"
+}
+
+# Catégorie Windows Update « Upgrades » : mises à niveau de version de Windows.
+$script:GenesisFeatureUpdateCategoryId = '3689bdc8-b205-4af4-8d4a-a63924c5e9d5'
+
+function Test-GenesisFeatureUpdate {
+    param([Parameter(Mandatory)]$Update)
+    $categories = try { @($Update.Categories) } catch { @() }
+    foreach ($category in $categories) {
+        if ([string]$category.CategoryID -eq $script:GenesisFeatureUpdateCategoryId) { return $true }
+    }
+    return $false
+}
+
+function Select-GenesisWindowsUpdate {
+    param([AllowEmptyCollection()][object[]]$Updates = @(), [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality')
+    @($Updates | Where-Object {
+            -not [bool]$_.IsInstalled -and -not [bool]$_.IsHidden -and
+            ((Test-GenesisFeatureUpdate -Update $_) -eq ($Scope -eq 'Feature'))
+        })
 }
 
 function New-GenesisWindowsUpdateCollection {
@@ -376,49 +397,50 @@ function Get-GenesisWindowsCurrentVersion {
 function Get-GenesisWindowsVersionStatus {
     [CmdletBinding()]
     param([object]$Session)
+    # La checklist interroge cet état pour deux opérations : une seule recherche suffit.
+    $cache = Get-Variable -Scope Script -Name GenesisWindowsVersionStatusCache -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $Session -and $null -ne $cache -and ([datetime]::UtcNow - $cache.At).TotalMinutes -lt 5) { return $cache.Status }
     $current = Get-GenesisWindowsCurrentVersion
     $latest = $current.Label
     $availableCount = 0
-    $featureCandidates = @()
+    $featureTitle = $null
     $scanSucceeded = $false
     $scanError = $null
     try {
         if ($null -eq $Session) { $Session = Get-GenesisWindowsUpdateSession }
         $searcher = $Session.CreateUpdateSearcher()
         $result = $searcher.Search((Get-GenesisWindowsUpdateSearchCriterion))
-        $available = @($result.Updates | Where-Object { -not [bool]$_.IsInstalled -and -not [bool]$_.IsHidden })
-        $availableCount = $available.Count
-        foreach ($update in $available) {
-            $title = [string]$update.Title
-            if ($title -match '(?i)(?:Windows 11|Windows 10).{0,60}version\s+(\d{2}H\d)') {
-                $featureCandidates += [pscustomobject]@{ Version = $Matches[1]; Title = $title }
-            }
-        }
+        $updates = @($result.Updates)
+        $availableCount = @(Select-GenesisWindowsUpdate -Updates $updates -Scope Quality).Count
+        $features = @(Select-GenesisWindowsUpdate -Updates $updates -Scope Feature)
         $scanSucceeded = $true
-        if ($featureCandidates.Count -gt 0) {
-            $latest = [string](@($featureCandidates | Sort-Object @{ Expression = { [int](($_.Version -replace 'H', '')) }; Descending = $true } | Select-Object -First 1).Title)
+        if ($features.Count -gt 0) {
+            $featureTitle = [string](@($features | Sort-Object @{ Expression = {
+                            if ([string]$_.Title -match '(?i)version\s+(\d{2})H(\d)') { [int]($Matches[1] + $Matches[2]) } else { 0 }
+                        }; Descending = $true
+                    } | Select-Object -First 1).Title)
+            $latest = $featureTitle
         }
-        elseif ($availableCount -eq 0) {
-            $latest = 'Aucune mise à jour proposée par Windows Update'
-        }
-        else {
-            $latest = 'Aucune nouvelle version de Windows détectée'
-        }
+        elseif ($availableCount -eq 0) { $latest = 'Aucune mise à jour proposée par Windows Update' }
+        else { $latest = 'Aucune nouvelle version de Windows détectée' }
     }
     catch {
         $scanError = $_.Exception.Message
         $latest = 'Recherche Windows Update indisponible'
     }
-    [pscustomobject]@{
+    $status = [pscustomobject]@{
         Current = $current.Label
         CurrentVersion = $current.DisplayVersion
         CurrentBuild = $current.Build
         Latest = $latest
         LatestVersion = $latest
         AvailableCount = $availableCount
+        FeatureUpdate = $featureTitle
         ScanSucceeded = $scanSucceeded
         Error = $scanError
     }
+    if ($scanSucceeded) { $script:GenesisWindowsVersionStatusCache = [pscustomobject]@{ At = [datetime]::UtcNow; Status = $status } }
+    return $status
 }
 
 function Invoke-GenesisWindowsUpdate {
@@ -426,14 +448,18 @@ function Invoke-GenesisWindowsUpdate {
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
         [object]$Session,
-        [ValidateRange(1, 5)][int]$MaxPasses = 3
+        [ValidateRange(1, 5)][int]$MaxPasses = 3,
+        [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality'
     )
     if ($env:OS -ne 'Windows_NT') { throw 'Windows Update est disponible sur Windows uniquement.' }
     if ($null -eq $Session) { $Session = Get-GenesisWindowsUpdateSession }
+    $stepId = if ($Scope -eq 'Feature') { 'windows-feature-update' } else { 'windows-update' }
+    $label = if ($Scope -eq 'Feature') { 'mise à niveau de Windows' } else { 'mise(s) à jour' }
     $criteria = Get-GenesisWindowsUpdateSearchCriterion
-    $logPath = Join-Path $RunDirectory 'windows-update.json'
+    $logPath = Join-Path $RunDirectory ($stepId + '.json')
     $journal = [ordered]@{
         SchemaVersion = 1
+        Scope = $Scope
         SearchCriteria = $criteria
         StartedAt = [datetime]::UtcNow.ToString('o')
         FinishedAt = $null
@@ -443,15 +469,19 @@ function Invoke-GenesisWindowsUpdate {
     }
     Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
     for ($passNumber = 1; $passNumber -le $MaxPasses; $passNumber++) {
-        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 10 -Message ("Recherche Windows Update (passe {0}/{1})" -f $passNumber, $MaxPasses)
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 10 -Message ("Recherche Windows Update (passe {0}/{1})" -f $passNumber, $MaxPasses)
         $searcher = $Session.CreateUpdateSearcher()
         $searchResult = $searcher.Search($criteria)
-        $available = @($searchResult.Updates | Where-Object { -not [bool]$_.IsInstalled -and -not [bool]$_.IsHidden })
+        $available = @(Select-GenesisWindowsUpdate -Updates @($searchResult.Updates) -Scope $Scope)
         if ($available.Count -eq 0) {
             $journal.AvailableAtEnd = 0
             $journal.FinishedAt = [datetime]::UtcNow.ToString('o')
             Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
-            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 100 -Message 'Windows est à jour ; aucune mise à jour facultative disponible.'
+            if ($Scope -eq 'Feature') {
+                Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Aucune mise à niveau de Windows proposée.'
+                return [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Windows est à la dernière version proposée.' }
+            }
+            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Windows est à jour ; aucune mise à jour facultative disponible.'
             return [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Windows et les mises à jour facultatives sont à jour.' }
         }
 
@@ -462,14 +492,14 @@ function Invoke-GenesisWindowsUpdate {
             [void]$updates.Add($update)
             $titles += [string]$update.Title
         }
-        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 30 -Message ("{0} mise(s) à jour détectée(s) ; téléchargement" -f $available.Count)
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 30 -Message ("{0} {1} détectée(s) ; téléchargement" -f $available.Count, $label)
         $downloader = $Session.CreateUpdateDownloader()
         $downloader.Updates = $updates
         $downloadResult = $downloader.Download()
         $downloadCode = Get-GenesisWindowsUpdateResultCode -Result $downloadResult
         if ($downloadCode -notin @(2, 3)) { throw ("Téléchargement Windows Update échoué (code {0})." -f $downloadCode) }
 
-        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 65 -Message ("Installation de {0} mise(s) à jour" -f $available.Count)
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 65 -Message ("Installation : {0}" -f ($titles -join ', '))
         $installer = $Session.CreateUpdateInstaller()
         $installer.Updates = $updates
         $installResult = $installer.Install()
@@ -489,14 +519,14 @@ function Invoke-GenesisWindowsUpdate {
         if ($rebootRequired) {
             $journal.FinishedAt = [datetime]::UtcNow.ToString('o')
             Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
-            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 100 -Message 'Redémarrage requis ; redémarrer puis reprendre Genesis.'
+            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Redémarrage requis ; redémarrer puis reprendre Genesis.'
             return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Windows Update demande un redémarrage. Redémarrer puis utiliser Resume Genesis.' }
         }
     }
     $journal.FinishedAt = [datetime]::UtcNow.ToString('o')
     $journal.AvailableAtEnd = $null
     Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
-    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 100 -Message 'Plusieurs passes exécutées ; reprendre pour rechercher les mises à jour restantes.'
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Plusieurs passes exécutées ; reprendre pour rechercher les mises à jour restantes.'
     [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Des mises à jour restent proposées après plusieurs passes ; reprendre Genesis.' }
 }
 
@@ -1642,6 +1672,7 @@ function Invoke-GenesisCustomization {
     if ($env:OS -ne 'Windows_NT') { throw 'Personnalisation disponible sur Windows uniquement.' }
     switch ($StepId) {
         'windows-update' { return Invoke-GenesisWindowsUpdate -RunDirectory $RunDirectory }
+        'windows-feature-update' { return Invoke-GenesisWindowsUpdate -RunDirectory $RunDirectory -Scope Feature }
         'time-sync' { return Set-GenesisWindowsTime -RunDirectory $RunDirectory }
         'power-ac' { return Set-GenesisPowerAc -RunDirectory $RunDirectory }
         'local-user' { return New-GenesisLocalUser -RunDirectory $RunDirectory }

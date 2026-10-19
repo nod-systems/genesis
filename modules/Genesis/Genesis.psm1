@@ -1,5 +1,5 @@
 ﻿Set-StrictMode -Version Latest
-$script:GenesisVersion = '0.5.19'
+$script:GenesisVersion = '0.5.20'
 $script:GenesisConsoleProgressStepId = $null
 $script:GenesisConsoleProgressLineLength = 0
 
@@ -9,6 +9,7 @@ function Get-GenesisStepCatalog {
     foreach ($entry in @(
         @('inventory', 'Identifier le matériel et Windows', 'Machine', $false, $false),
         @('windows-update', 'Mettre à jour Windows + les mises à jour facultatives', 'Machine', $true, $false),
+        @('windows-feature-update', 'Mettre à niveau Windows vers la dernière version proposée (ex. 26H2)', 'Machine', $true, $false),
         @('explorer-home', 'Ouvrir l''Explorateur sur Ce PC', 'Utilisateur', $true, $true),
         @('windows-suggestions', 'Désactiver les conseils et suggestions Windows', 'Utilisateur', $true, $true),
         @('tray-icons', 'Afficher les icônes de notification présentes', 'Utilisateur', $true, $true),
@@ -718,6 +719,231 @@ function Resume-GenesisRun {
     finally { $lock.Dispose() }
 }
 
+$script:GenesisUpdateTaskName = 'Genesis - reprise Windows Update'
+$script:GenesisUpdateMaxReboots = 8
+
+function Get-GenesisPortablePath {
+    # Renseigné par Genesis-Portable.ps1 : le mode module n'a pas de fichier unique à relancer.
+    return Get-Variable -Scope Script -Name GenesisPortablePath -ValueOnly -ErrorAction SilentlyContinue
+}
+
+function Test-GenesisUpdateRebootPending {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    $journalPath = Join-Path $RunDirectory 'windows-update.json'
+    if (Test-Path -LiteralPath $journalPath) {
+        try {
+            if ((Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json).PendingReboot -eq $true) { return $true }
+        }
+        catch { Write-Verbose 'Journal Windows Update illisible.' }
+    }
+    if ($env:OS -ne 'Windows_NT') { return $false }
+    return (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
+}
+
+$script:GenesisUpdateStepIds = @('windows-update', 'windows-feature-update')
+
+function Test-GenesisUpdateContinuationNeeded {
+    param([Parameter(Mandatory)]$State)
+    # Windows Update ne termine en NeedsAttention que pour un redémarrage ou des mises à jour restantes.
+    return (@($State.Steps | Where-Object { $_.Id -in $script:GenesisUpdateStepIds -and $_.Status -eq 'NeedsAttention' }).Count -gt 0)
+}
+
+function Restart-GenesisComputer {
+    param([ValidateRange(0, 600)][int]$DelaySeconds = 60, [Parameter(Mandatory)][ValidatePattern('^[^"]+$')][string]$Reason)
+    $result = Invoke-GenesisNativeCommand -FilePath 'shutdown.exe' -Arguments ('/r /t {0} /d p:2:17 /c "{1}"' -f $DelaySeconds, $Reason)
+    if ($result.ExitCode -ne 0) { throw "Redémarrage refusé par Windows (code $($result.ExitCode))." }
+}
+
+function Unregister-GenesisUpdateContinuation {
+    if ($null -ne (Get-ScheduledTask -TaskName $script:GenesisUpdateTaskName -ErrorAction SilentlyContinue)) {
+        Unregister-ScheduledTask -TaskName $script:GenesisUpdateTaskName -Confirm:$false -ErrorAction Stop
+    }
+}
+
+function Register-GenesisUpdateContinuation {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{32}$')][string]$RunId,
+        [string]$DataRoot
+    )
+    $source = Get-GenesisPortablePath
+    if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw 'La reprise automatique après redémarrage nécessite Genesis-Portable.ps1.'
+    }
+    $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
+    if (-not $PSCmdlet.ShouldProcess($RunId, 'Programmer la reprise de Windows Update au démarrage')) { return }
+    Assert-GenesisAdministrator
+    $lock = Open-GenesisRunLock -DataRoot $root
+    try {
+        $state = Get-GenesisRun -RunId $RunId -DataRoot $root
+        if ($state.MachineId -cne (Get-GenesisMachineId)) { throw 'Cette préparation appartient à un autre ordinateur.' }
+        if (-not (Test-GenesisUpdateContinuationNeeded -State $state)) { throw 'Aucune mise à jour Windows en attente dans cette préparation.' }
+        $directory = Join-Path (Join-Path $root 'runs') $RunId
+        # Le lanceur supprime sa copie temporaire : la tâche démarre une copie du répertoire protégé.
+        $binDirectory = Join-Path $root 'bin'
+        New-Item -Path $binDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $target = Join-Path $binDirectory 'Genesis-Portable.ps1'
+        Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) {
+            throw 'Copie de Genesis incohérente ; reprise automatique non programmée.'
+        }
+        $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action ContinueUpdates -RunId {1} -DataRoot "{2}"' -f $target, $RunId, $root
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $trigger.Delay = 'PT1M'
+        $task = @{
+            TaskName = $script:GenesisUpdateTaskName
+            Description = 'Reprise des mises à jour Windows de la préparation Genesis ' + $RunId
+            Action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
+            Trigger = $trigger
+            Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 8)
+        }
+        Register-ScheduledTask @task -Force -ErrorAction Stop | Out-Null
+        $continuation = [pscustomobject]@{
+            SchemaVersion = 1; RunId = $RunId; MachineId = Get-GenesisMachineId
+            Reboots = 0; MaxReboots = $script:GenesisUpdateMaxReboots
+            RegisteredAt = [datetime]::UtcNow.ToString('o'); FinishedAt = $null; Outcome = 'Scheduled'
+        }
+        Write-GenesisJson -Path (Join-Path $directory 'update-continuation.json') -Value $continuation
+        Add-GenesisEvent -RunDirectory $directory -EventName 'update_continuation_registered' -StepId 'windows-update'
+        return $continuation
+    }
+    finally { $lock.Dispose() }
+}
+
+function Send-GenesisSessionMessage {
+    param([Parameter(Mandatory)][string]$Message)
+    try { Invoke-GenesisNativeCommand -FilePath 'msg.exe' -Arguments ('* /TIME:3600 "{0}"' -f ($Message -replace '"', "'")) | Out-Null }
+    catch { Write-Verbose ('Notification de session impossible : ' + $_.Exception.Message) }
+}
+
+function Invoke-GenesisUpdateContinuation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{32}$')][string]$RunId,
+        [string]$DataRoot,
+        [ValidateRange(0, 600)][int]$RetryDelaySeconds = 60
+    )
+    $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
+    Assert-GenesisAdministrator
+    $restart = $false
+    $notice = $null
+    $lock = Open-GenesisRunLock -DataRoot $root
+    try {
+        $directory = Join-Path (Join-Path $root 'runs') $RunId
+        $continuationPath = Join-Path $directory 'update-continuation.json'
+        $state = Get-GenesisRun -RunId $RunId -DataRoot $root
+        $continuation = Get-Content -LiteralPath $continuationPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $updateSteps = @($state.Steps | Where-Object { $_.Id -in $script:GenesisUpdateStepIds })
+        $stopReason = $null
+        if ($state.MachineId -cne (Get-GenesisMachineId) -or $continuation.MachineId -cne (Get-GenesisMachineId)) { $stopReason = 'Préparation d''un autre ordinateur.' }
+        elseif ($state.GenesisVersion -cne $script:GenesisVersion) { $stopReason = 'Version de Genesis différente.' }
+        elseif ($state.Status -in @('Restoring', 'Restored', 'RestoreConflict')) { $stopReason = 'Préparation restaurée entre-temps.' }
+        elseif (@($updateSteps | Where-Object { $_.Status -ne 'Completed' }).Count -eq 0) { $stopReason = 'Windows Update déjà terminé.' }
+        if ($null -ne $stopReason) {
+            Unregister-GenesisUpdateContinuation
+            $continuation.Outcome = 'Stopped'; $continuation.FinishedAt = [datetime]::UtcNow.ToString('o')
+            Write-GenesisJson -Path $continuationPath -Value $continuation
+            Add-GenesisEvent -RunDirectory $directory -EventName 'update_continuation_stopped' -StepId 'windows-update'
+            return [pscustomobject]@{ RunId = $RunId; Outcome = 'Stopped'; Message = $stopReason; Reboots = $continuation.Reboots }
+        }
+
+        $path = Join-Path $directory 'state.json'
+        $state.Status = 'Running'; $state.FinishedAt = $null
+        Write-GenesisJson -Path $path -Value $state
+        Add-GenesisEvent -RunDirectory $directory -EventName 'update_continuation_started' -StepId 'windows-update'
+        # Après une mise à niveau, la nouvelle version reçoit ses propres mises à jour de qualité.
+        $featurePending = @($updateSteps | Where-Object { $_.Id -eq 'windows-feature-update' -and $_.Status -ne 'Completed' }).Count -gt 0
+        $failed = $false
+        $remaining = $false
+        $lastStep = $null
+        foreach ($step in $updateSteps) {
+            if ($step.Status -eq 'Completed' -and -not ($step.Id -eq 'windows-update' -and $featurePending)) { continue }
+            $lastStep = $step
+            $scope = if ($step.Id -eq 'windows-feature-update') { 'Feature' } else { 'Quality' }
+            $step.Status = 'Running'; $step.Percent = 10; $step.Message = 'Reprise automatique après redémarrage'
+            $step.Attempts += 1; $step.ErrorType = $null
+            $step.StartedAt = [datetime]::UtcNow.ToString('o'); $step.FinishedAt = $null
+            Write-GenesisJson -Path $path -Value $state
+            # Le réseau peut ne pas être prêt juste après le démarrage.
+            $result = $null
+            for ($attempt = 1; $attempt -le 3 -and $null -eq $result; $attempt++) {
+                try { $result = Invoke-GenesisWindowsUpdate -RunDirectory $directory -Scope $scope }
+                catch {
+                    $step.ErrorType = $_.Exception.GetType().FullName
+                    if ($attempt -lt 3) { Start-Sleep -Seconds $RetryDelaySeconds }
+                }
+            }
+            $step.FinishedAt = [datetime]::UtcNow.ToString('o')
+            if ($null -eq $result) {
+                $step.Status = 'Failed'; $step.Percent = 0
+                $step.Message = 'Windows Update a échoué après redémarrage : reprendre Genesis manuellement.'
+                $failed = $true
+                break
+            }
+            $step.Status = $result.Status; $step.Percent = $result.Percent; $step.Message = $result.Message; $step.ErrorType = $null
+            Write-GenesisJson -Path $path -Value $state
+            # Un redémarrage doit précéder la suite : la mise à niveau attend les correctifs en cours.
+            if ($result.Status -eq 'NeedsAttention') { $remaining = $true; break }
+        }
+        if ($failed) { $continuation.Outcome = 'Failed' }
+        elseif ($remaining -and [int]$continuation.Reboots -lt [int]$continuation.MaxReboots) {
+            $continuation.Reboots = [int]$continuation.Reboots + 1
+            $lastStep.Message = 'Redémarrage {0}/{1} pour poursuivre les mises à jour Windows.' -f $continuation.Reboots, $continuation.MaxReboots
+            $continuation.Outcome = 'Rebooting'
+            $restart = $true
+        }
+        elseif ($remaining) {
+            $lastStep.Message = 'Nombre maximal de redémarrages atteint ; reprendre Genesis manuellement.'
+            $continuation.Outcome = 'MaxReboots'
+        }
+        else { $continuation.Outcome = 'Completed' }
+        if (-not $restart) {
+            Unregister-GenesisUpdateContinuation
+            $continuation.FinishedAt = [datetime]::UtcNow.ToString('o')
+            $notice = if ($continuation.Outcome -eq 'Completed') { 'Genesis : mises à jour Windows terminées après {0} redémarrage(s).' -f $continuation.Reboots } else { 'Genesis : mises à jour Windows à vérifier. ' + $lastStep.Message }
+        }
+        $state.Status = 'Completed'
+        if (@($state.Steps | Where-Object { $_.Status -ne 'Completed' }).Count -gt 0) { $state.Status = 'NeedsAttention' }
+        $state.FinishedAt = [datetime]::UtcNow.ToString('o')
+        Write-GenesisJson -Path $path -Value $state
+        Write-GenesisJson -Path $continuationPath -Value $continuation
+        $errorType = if ($null -ne $lastStep) { [string]$lastStep.ErrorType } else { '' }
+        $eventStep = if ($null -ne $lastStep) { [string]$lastStep.Id } else { 'windows-update' }
+        Add-GenesisEvent -RunDirectory $directory -EventName ('update_continuation_' + ([string]$continuation.Outcome).ToLowerInvariant()) -StepId $eventStep -ErrorType $errorType
+    }
+    catch {
+        # Une préparation illisible ne doit pas relancer la tâche à chaque démarrage.
+        try { Unregister-GenesisUpdateContinuation } catch { Write-Verbose 'Suppression de la tâche de reprise impossible.' }
+        throw
+    }
+    finally { $lock.Dispose() }
+    if ($restart) { Restart-GenesisComputer -DelaySeconds 60 -Reason 'Genesis redémarre pour poursuivre les mises à jour Windows.' }
+    elseif ($null -ne $notice) { Send-GenesisSessionMessage -Message $notice }
+    $message = if ($null -ne $lastStep) { [string]$lastStep.Message } else { '' }
+    return [pscustomobject]@{ RunId = $RunId; Outcome = [string]$continuation.Outcome; Message = $message; Reboots = [int]$continuation.Reboots }
+}
+
+function Request-GenesisUpdateRestart {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Question console du technicien.')]
+    param([Parameter(Mandatory)]$State, [string]$DataRoot)
+    if (-not (Test-GenesisUpdateContinuationNeeded -State $State)) { return }
+    Write-Host ''
+    if ([string]::IsNullOrWhiteSpace((Get-GenesisPortablePath))) {
+        Write-Host ('Windows Update doit être repris après redémarrage : -Action Resume -RunId ' + $State.RunId) -ForegroundColor Yellow
+        return
+    }
+    $answer = Read-Host 'Windows Update demande un redémarrage. Redémarrer et poursuivre automatiquement les mises à jour [O/N]'
+    if ($answer -notmatch '^[OoYy]$') {
+        Write-Host ('Reprise manuelle possible : -Action Resume -RunId ' + $State.RunId) -ForegroundColor Yellow
+        return
+    }
+    Register-GenesisUpdateContinuation -RunId $State.RunId -DataRoot $DataRoot | Out-Null
+    Restart-GenesisComputer -DelaySeconds 30 -Reason 'Genesis redémarre pour poursuivre les mises à jour Windows.'
+    Write-Host ('Redémarrage dans 30 secondes. Les mises à jour reprendront au démarrage, sans ouverture de session (au plus {0} redémarrages).' -f $script:GenesisUpdateMaxReboots) -ForegroundColor Green
+}
+
 function Write-GenesisBanner {
     [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Bannière console du technicien.')]
     param()
@@ -816,6 +1042,15 @@ function Get-GenesisStepCompletion {
                     $detail = 'Actuelle : {0} | Dernière proposée : {1} | {2} mise(s) à jour disponible(s).' -f $versionStatus.Current, $versionStatus.Latest, $versionStatus.AvailableCount
                 }
                 else { $detail = 'Recherche Windows Update indisponible : ' + $versionStatus.Error }
+            }
+            'windows-feature-update' {
+                $versionStatus = Get-GenesisWindowsVersionStatus
+                $currentVersion = [string]$versionStatus.Current
+                $latestVersion = [string]$versionStatus.Latest
+                $done = ($versionStatus.ScanSucceeded -and [string]::IsNullOrWhiteSpace([string]$versionStatus.FeatureUpdate))
+                if (-not $versionStatus.ScanSucceeded) { $detail = 'Recherche Windows Update indisponible : ' + $versionStatus.Error }
+                elseif ($done) { $detail = 'Aucune mise à niveau proposée ; actuelle : ' + $versionStatus.Current }
+                else { $detail = 'Proposée : ' + $versionStatus.FeatureUpdate }
             }
             'explorer-home' {
                 $done = Test-GenesisCompletionRegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'LaunchTo' -Expected 1
@@ -916,6 +1151,12 @@ function Get-GenesisStepCompletion {
     }
 }
 
+function Test-GenesisStepSelectedByDefault {
+    param([Parameter(Mandatory)][string]$StepId)
+    # Une mise à niveau de version est longue et change Windows : choix explicite du technicien.
+    return ($StepId -notin @('windows-feature-update'))
+}
+
 function Get-GenesisMenuDoneMarker {
     param([bool]$Done)
     if ($Done) { return '[v]' }
@@ -955,7 +1196,7 @@ function Show-GenesisTaskChecklist {
         }
     }
     $checked = @{}
-    foreach ($step in $steps) { $checked[$step.Id] = $true }
+    foreach ($step in $steps) { $checked[$step.Id] = Test-GenesisStepSelectedByDefault -StepId $step.Id }
     $selectedChoices = [ordered]@{}
     if ($checked.ContainsKey('browser')) { $selectedChoices.browser = 'Chrome' }
     if ($checked.ContainsKey('pdf-reader')) { $selectedChoices.'pdf-reader' = 'Acrobat' }
@@ -1357,6 +1598,7 @@ function Show-GenesisMenu {
                         $run = Start-GenesisRun -ProfileObject $selection.Profile -Choices $selection.Choices -DataRoot $DataRoot
                         Write-Host ("RunId : {0}" -f $run.RunId) -ForegroundColor Cyan
                         Show-GenesisProgressTable -State $run
+                        Request-GenesisUpdateRestart -State $run -DataRoot $DataRoot
                     }
                 }
                 '2' {
@@ -1380,4 +1622,4 @@ function Show-GenesisMenu {
 . (Join-Path $PSScriptRoot 'Customization.ps1')
 . (Join-Path $PSScriptRoot 'Progress.ps1')
 
-Export-ModuleMember -Function Get-GenesisProfile, Get-GenesisStepCatalog, Get-GenesisPlan, Get-GenesisInventory, Format-GenesisInventoryAscii, Start-GenesisRun, Resume-GenesisRun, Get-GenesisRun, Show-GenesisMenu, Show-GenesisPrinterMenu, Get-GenesisNetworkPrinter, New-GenesisPrinterDriverSearchUrl, Open-GenesisPrinterDriverSearch, Add-GenesisPrinter, Get-GenesisProgress, Undo-GenesisRun, New-GenesisTaskbarXml, Confirm-GenesisTaskbar
+Export-ModuleMember -Function Register-GenesisUpdateContinuation, Invoke-GenesisUpdateContinuation, Get-GenesisProfile, Get-GenesisStepCatalog, Get-GenesisPlan, Get-GenesisInventory, Format-GenesisInventoryAscii, Start-GenesisRun, Resume-GenesisRun, Get-GenesisRun, Show-GenesisMenu, Show-GenesisPrinterMenu, Get-GenesisNetworkPrinter, New-GenesisPrinterDriverSearchUrl, Open-GenesisPrinterDriverSearch, Add-GenesisPrinter, Get-GenesisProgress, Undo-GenesisRun, New-GenesisTaskbarXml, Confirm-GenesisTaskbar

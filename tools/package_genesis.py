@@ -91,7 +91,7 @@ def build_portable_script(source: Path) -> bytes:
 param(
     [ValidateSet(
         'Menu', 'Gui', 'Inventory', 'Plan', 'Run', 'Resume', 'Status', 'Catalog', 'Undo',
-        'ConfirmTaskbar'
+        'ConfirmTaskbar', 'ContinueUpdates'
     )]
     [string]$Action = 'Menu',
     [ValidateSet('base', 'windows')]
@@ -117,6 +117,8 @@ else {
     $profileArguments.ProfilePath = $ProfilePath
 }
 $runControlArguments = @{ RunId = $RunId; DataRoot = $DataRoot; WhatIf = $WhatIfPreference }
+# La reprise après redémarrage relance ce fichier unique depuis le répertoire protégé.
+$script:GenesisPortablePath = $PSCommandPath
 
 switch ($Action) {
     'Menu' { Show-GenesisMenu @profileArguments -DataRoot $DataRoot }
@@ -137,6 +139,9 @@ switch ($Action) {
     'Status' { Get-GenesisRun -RunId $RunId -DataRoot $DataRoot | ConvertTo-Json -Depth 16 }
     'Undo' { Undo-GenesisRun @runControlArguments | ConvertTo-Json -Depth 16 }
     'ConfirmTaskbar' { Confirm-GenesisTaskbar @runControlArguments | ConvertTo-Json -Depth 16 }
+    'ContinueUpdates' {
+        Invoke-GenesisUpdateContinuation -RunId $RunId -DataRoot $DataRoot | ConvertTo-Json -Depth 8
+    }
 }
 """
     content = header + _flatten_module(source)
