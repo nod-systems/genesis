@@ -982,13 +982,19 @@ function Get-GenesisOfficeDeploymentToolUri {
     throw 'Téléchargement officiel de l''Office Deployment Tool Microsoft introuvable.'
 }
 
-function Assert-GenesisMicrosoftSignature {
-    param([Parameter(Mandatory)][string]$Path)
+function Assert-GenesisPublisherSignature {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Publisher)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
     if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
-        throw 'L''exécutable Office ne possède pas une signature Microsoft valide.'
+        $signature.SignerCertificate.Subject -notmatch ('(?:^|,\s*)O=' + [regex]::Escape($Publisher) + '(?:,|$)')) {
+        throw "L'installateur $([IO.Path]::GetFileName($Path)) ne possède pas une signature $Publisher valide ; programme non exécuté."
     }
+}
+
+function Assert-GenesisMicrosoftSignature {
+    param([Parameter(Mandatory)][string]$Path)
+    try { Assert-GenesisPublisherSignature -Path $Path -Publisher 'Microsoft Corporation' }
+    catch { throw 'L''exécutable Office ne possède pas une signature Microsoft valide.' }
 }
 
 function Install-GenesisOffice2024 {
@@ -1040,7 +1046,9 @@ function Install-GenesisBrowser {
     $uri = if ($browser -eq 'Chrome') { [uri]'https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi' } else { [uri]'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=fr' }
     $extension = if ($browser -eq 'Chrome') { '.msi' } else { '.exe' }
     $download = Save-GenesisDownload -Uri $uri -Path (Join-Path $softwareDirectory ("{0}-latest{1}" -f $browser.ToLowerInvariant(), $extension))
-    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'browser' -Percent 30 -Message ("{0} téléchargé ; SHA-256 {1}" -f $browser, $download.Sha256)
+    $publisher = if ($browser -eq 'Chrome') { 'Google LLC' } else { 'Mozilla Corporation' }
+    Assert-GenesisPublisherSignature -Path $download.Path -Publisher $publisher
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'browser' -Percent 30 -Message ("{0} téléchargé et signé par {1} ; SHA-256 {2}" -f $browser, $publisher, $download.Sha256)
     $result = if ($browser -eq 'Chrome') {
         Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /qn /norestart' -f $download.Path) -TimeoutSeconds 1800
     }
@@ -1081,6 +1089,8 @@ function Install-GenesisWingetPackage {
     param([Parameter(Mandatory)][string]$Id)
     if ($null -eq (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Status = 'NeedsAttention'; Message = 'winget.exe est indisponible ; installer le logiciel depuis sa source officielle.' } }
     $result = Invoke-GenesisNativeCommand -FilePath 'winget.exe' -Arguments ('install --id {0} --exact --silent --accept-package-agreements --accept-source-agreements' -f $Id) -TimeoutSeconds 1800
+    # 0x8A150061 : paquet déjà installé ; 0x8A15002B : aucune mise à jour applicable.
+    if ($result.ExitCode -in @(-1978335135, -1978335189)) { return [pscustomobject]@{ Status = 'Completed'; Message = "Paquet $Id déjà installé." } }
     if ($result.ExitCode -notin @(0, 3010, 1641)) { throw "winget a renvoyé le code $($result.ExitCode) pour $Id." }
     [pscustomobject]@{ Status = 'Completed'; Message = "Paquet $Id installé." }
 }
@@ -1088,7 +1098,8 @@ function Install-GenesisWingetPackage {
 function Get-GenesisPdfReaderPath {
     param([ValidateSet('Acrobat', 'SumatraPDF', 'PDFCraft')][string]$Reader)
     switch ($Reader) {
-        'Acrobat' { return Get-GenesisExecutablePath -Names @('AcroRd32.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe'), (Join-Path ${env:ProgramFiles(x86)} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe')) }
+        # Le paquet 64 bits installe le lecteur unifié Acrobat.exe ; AcroRd32.exe reste l'ancien lecteur 32 bits.
+        'Acrobat' { return Get-GenesisExecutablePath -Names @('Acrobat.exe', 'AcroRd32.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'Adobe\Acrobat DC\Acrobat\Acrobat.exe'), (Join-Path ${env:ProgramFiles} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe'), (Join-Path ${env:ProgramFiles(x86)} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe')) }
         'SumatraPDF' { return Get-GenesisExecutablePath -Names @('SumatraPDF.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'SumatraPDF\SumatraPDF.exe'), (Join-Path ${env:ProgramFiles(x86)} 'SumatraPDF\SumatraPDF.exe'), (Join-Path $env:LOCALAPPDATA 'SumatraPDF\SumatraPDF.exe')) }
         'PDFCraft' {
             $known = Get-GenesisExecutablePath -Names @('pdfcraft.exe', 'PDFCraft.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'PDFCraft\pdfcraft.exe'), (Join-Path ${env:ProgramFiles(x86)} 'PDFCraft\pdfcraft.exe'))
@@ -1124,6 +1135,7 @@ function Install-GenesisPdfReader {
     }
     if ($reader -eq 'PDFCraft') {
         $download = Save-GenesisDownload -Uri $uri -Path (Join-Path $softwareDirectory $fileName) -ExpectedSha256 $sha256
+        Assert-GenesisPublisherSignature -Path $download.Path -Publisher 'Learning Machines Inc'
         $install = Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /qn /norestart INSTALLDESKTOPSHORTCUT=0' -f $download.Path) -TimeoutSeconds 1800
         if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "Installation PDFCraft impossible (code $($install.ExitCode))." }
     }
@@ -1249,6 +1261,7 @@ function Install-GenesisNetBird {
     if ([string]::IsNullOrWhiteSpace($executable)) {
         $installerPath = Join-Path $softwareDirectory 'netbird-latest.msi'
         $download = Save-GenesisDownload -Uri ([uri]$script:GenesisNetBirdMsiUri) -Path $installerPath
+        Assert-GenesisPublisherSignature -Path $download.Path -Publisher 'NetBird GmbH'
         Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'netbird' -Percent 30 -Message 'Installateur NetBird téléchargé ; installation silencieuse'
         $install = Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /quiet /norestart' -f $download.Path) -TimeoutSeconds 1800
         if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "Installation NetBird impossible (code $($install.ExitCode))." }

@@ -1,5 +1,5 @@
 ﻿Set-StrictMode -Version Latest
-$script:GenesisVersion = '0.5.18'
+$script:GenesisVersion = '0.5.19'
 $script:GenesisConsoleProgressStepId = $null
 $script:GenesisConsoleProgressLineLength = 0
 
@@ -364,6 +364,45 @@ function Initialize-GenesisDataRoot {
     }
 }
 
+function Protect-GenesisDataRoot {
+    param([Parameter(Mandatory)][string]$DataRoot, [string]$LockPath)
+    if ($env:OS -ne 'Windows_NT') { return }
+    $administrators = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $root = New-Object System.IO.DirectoryInfo([System.IO.Path]::GetFullPath($DataRoot))
+    $pending = New-Object System.Collections.Generic.Queue[System.IO.FileSystemInfo]
+    $pending.Enqueue($root)
+    while ($pending.Count -gt 0) {
+        $item = $pending.Dequeue()
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Lien ou jonction interdit dans le répertoire de données Genesis : $($item.FullName)"
+        }
+        if ($LockPath -and $item.FullName -eq $LockPath) { continue }
+        try {
+            $security = $item.GetAccessControl()
+            $security.SetOwner($administrators)
+            foreach ($rule in @($security.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+                [void]$security.RemoveAccessRuleSpecific($rule)
+            }
+            if ($item -eq $root) {
+                # Racine : seules les règles SYSTEM et Administrateurs, sans héritage de ProgramData.
+                $security.SetAccessRuleProtection($true, $false)
+                foreach ($identity in @($system, $administrators)) {
+                    $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+                }
+            }
+            else { $security.SetAccessRuleProtection($false, $false) }
+            $item.SetAccessControl($security)
+        }
+        catch {
+            throw "Le répertoire de données Genesis n'a pas pu être protégé ($($item.FullName)) : $($_.Exception.Message). Le supprimer ou corriger ses droits avant de relancer Genesis."
+        }
+        if ($item -is [System.IO.DirectoryInfo]) {
+            foreach ($child in $item.GetFileSystemInfos()) { $pending.Enqueue($child) }
+        }
+    }
+}
+
 function Write-GenesisJson {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
     $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
@@ -585,7 +624,7 @@ function Open-GenesisRunLock {
     }
     $lockPath = Join-Path $root '.lock'
     try {
-        return [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+        $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
     }
     catch {
         $exception = $_.Exception
@@ -601,6 +640,14 @@ function Open-GenesisRunLock {
         }
         throw "Le verrou Genesis est inaccessible : $lockPath ($($exception.Message))"
     }
+    # Les sauvegardes sont relues avec les droits administrateur : le répertoire
+    # doit être protégé même s'il a été créé avant Genesis.
+    try { Protect-GenesisDataRoot -DataRoot $root -LockPath $lockPath }
+    catch {
+        $lock.Dispose()
+        throw
+    }
+    return $lock
 }
 
 function Start-GenesisRun {
@@ -1090,14 +1137,14 @@ function Show-GenesisDebloatMenu {
     param([string]$DataRoot)
     $programs = @(Get-GenesisInstalledProgram)
     $logPath = $null
-    if (-not [string]::IsNullOrWhiteSpace($DataRoot)) {
-        try {
-            $logDirectory = Join-Path $DataRoot 'debloat'
-            New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-            $logPath = Join-Path $logDirectory ((Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
-        }
-        catch { Write-Verbose ('Journal Debloat indisponible : ' + $_.Exception.Message) }
+    try {
+        $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
+        Initialize-GenesisDataRoot -DataRoot $root
+        $logDirectory = Join-Path $root 'debloat'
+        New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $logPath = Join-Path $logDirectory ((Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
     }
+    catch { Write-Host ('Journal Debloat indisponible : ' + $_.Exception.Message) -ForegroundColor Yellow }
     if ($programs.Count -eq 0) {
         Write-Host 'Aucun programme classique détecté dans les désinstallateurs Windows.' -ForegroundColor Yellow
         return

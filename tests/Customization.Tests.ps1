@@ -763,3 +763,151 @@ Describe 'Source publique Office LTSC' {
         }
     }
 }
+
+Describe 'Signatures des installateurs' {
+    It 'accepte uniquement l''éditeur attendu' -Tag Windows {
+        InModuleScope Genesis {
+            Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Google LLC, O=Google LLC, L=Mountain View, C=US' } } }
+            { Assert-GenesisPublisherSignature -Path 'chrome.msi' -Publisher 'Google LLC' } | Should -Not -Throw
+            { Assert-GenesisPublisherSignature -Path 'chrome.msi' -Publisher 'Mozilla Corporation' } | Should -Throw '*Mozilla Corporation*'
+        }
+    }
+
+    It 'refuse une signature invalide même avec le bon éditeur' -Tag Windows {
+        InModuleScope Genesis {
+            Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'HashMismatch'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=NetBird GmbH, O=NetBird GmbH' } } }
+            { Assert-GenesisPublisherSignature -Path 'netbird.msi' -Publisher 'NetBird GmbH' } | Should -Throw '*non exécuté*'
+        }
+    }
+
+    It 'n''installe pas un navigateur dont la signature est refusée' {
+        InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+            param($Root)
+            $runDirectory = $Root
+            Mock Save-GenesisDownload { param($Path) [pscustomobject]@{ Path = $Path; Uri = 'https://dl.google.com/example.msi'; Sha256 = 'fictitious' } }
+            Mock Assert-GenesisPublisherSignature { throw 'signature refusée' }
+            Mock Set-GenesisStepProgress {}
+            Mock Invoke-GenesisNativeCommand { [pscustomobject]@{ ExitCode = 0 } }
+            { Install-GenesisBrowser -RunDirectory $runDirectory -Choice 'Chrome' } | Should -Throw '*signature refusée*'
+            Should -Invoke Assert-GenesisPublisherSignature -Exactly -Times 1 -ParameterFilter { $Publisher -eq 'Google LLC' }
+            Should -Invoke Invoke-GenesisNativeCommand -Exactly -Times 0
+        }
+    }
+
+    It 'vérifie l''éditeur Mozilla pour Firefox' {
+        InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+            param($Root)
+            $runDirectory = $Root
+            Mock Save-GenesisDownload { param($Path) [pscustomobject]@{ Path = $Path; Uri = 'https://download.mozilla.org/example'; Sha256 = 'fictitious' } }
+            Mock Assert-GenesisPublisherSignature { throw 'signature refusée' }
+            Mock Invoke-GenesisNativeCommand { [pscustomobject]@{ ExitCode = 0 } }
+            { Install-GenesisBrowser -RunDirectory $runDirectory -Choice 'Firefox' } | Should -Throw
+            Should -Invoke Assert-GenesisPublisherSignature -Exactly -Times 1 -ParameterFilter { $Publisher -eq 'Mozilla Corporation' }
+            Should -Invoke Invoke-GenesisNativeCommand -Exactly -Times 0
+        }
+    }
+
+    It 'n''installe pas NetBird dont la signature est refusée' {
+        InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+            param($Root)
+            $runDirectory = $Root
+            Mock Read-GenesisNetBirdManagementUrl { 'https://netbird.example.test:443' }
+            Mock Set-GenesisNetBirdManagementServer { [pscustomobject]@{ Configured = $true } }
+            Mock Get-GenesisNetBirdPath { $null }
+            Mock Set-GenesisStepProgress {}
+            Mock Save-GenesisDownload { param($Path) [pscustomobject]@{ Path = $Path; Uri = 'https://pkgs.netbird.io/windows/msi/x64'; Sha256 = 'fictitious' } }
+            Mock Assert-GenesisPublisherSignature { throw 'signature refusée' }
+            Mock Invoke-GenesisNativeCommand { [pscustomobject]@{ ExitCode = 0 } }
+            { Install-GenesisNetBird -RunDirectory $runDirectory } | Should -Throw '*signature refusée*'
+            Should -Invoke Assert-GenesisPublisherSignature -Exactly -Times 1 -ParameterFilter { $Publisher -eq 'NetBird GmbH' }
+            Should -Invoke Invoke-GenesisNativeCommand -Exactly -Times 0
+        }
+    }
+}
+
+Describe 'Lecteurs PDF et winget' {
+    It 'recherche le lecteur Acrobat 64 bits unifié' -Tag Windows {
+        InModuleScope Genesis {
+            Mock Get-GenesisExecutablePath { param($Names, $Candidates) $script:AcrobatCandidates = $Candidates; $script:AcrobatNames = $Names; $null }
+            Get-GenesisPdfReaderPath -Reader 'Acrobat' | Out-Null
+            ($script:AcrobatCandidates -join '|') | Should -Match ([regex]::Escape('Adobe\Acrobat DC\Acrobat\Acrobat.exe'))
+            $script:AcrobatNames | Should -Contain 'Acrobat.exe'
+        }
+    }
+
+    It 'considère un paquet winget déjà installé comme terminé' {
+        InModuleScope Genesis {
+            Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe'; Source = 'winget.exe' } } -ParameterFilter { $Name -eq 'winget.exe' }
+            Mock Invoke-GenesisNativeCommand { [pscustomobject]@{ ExitCode = -1978335135; Output = ''; ErrorOutput = '' } }
+            (Install-GenesisWingetPackage -Id 'Exemple.Paquet').Status | Should -Be 'Completed'
+        }
+    }
+
+    It 'considère l''absence de mise à jour winget applicable comme terminée' {
+        InModuleScope Genesis {
+            Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe'; Source = 'winget.exe' } } -ParameterFilter { $Name -eq 'winget.exe' }
+            Mock Invoke-GenesisNativeCommand { [pscustomobject]@{ ExitCode = -1978335189; Output = ''; ErrorOutput = '' } }
+            (Install-GenesisWingetPackage -Id 'Exemple.Paquet').Status | Should -Be 'Completed'
+        }
+    }
+
+    It 'signale toujours un échec winget réel' {
+        InModuleScope Genesis {
+            Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe'; Source = 'winget.exe' } } -ParameterFilter { $Name -eq 'winget.exe' }
+            Mock Invoke-GenesisNativeCommand { [pscustomobject]@{ ExitCode = 1603; Output = ''; ErrorOutput = '' } }
+            { Install-GenesisWingetPackage -Id 'Exemple.Paquet' } | Should -Throw '*1603*'
+        }
+    }
+}
+
+Describe 'Journal Debloat' {
+    It 'prépare le journal dans le répertoire de données par défaut' {
+        InModuleScope Genesis -Parameters @{ Root = (Join-Path $TestDrive 'genesis-data') } {
+            param($Root)
+            Mock Resolve-GenesisDataRoot { $Root }
+            Mock Get-GenesisInstalledProgram { @() }
+            Mock Write-Host {}
+            Show-GenesisDebloatMenu
+            Test-Path -LiteralPath (Join-Path $Root 'debloat') -PathType Container | Should -BeTrue
+            Should -Invoke Resolve-GenesisDataRoot -Exactly -Times 1 -ParameterFilter { [string]::IsNullOrWhiteSpace($DataRoot) }
+        }
+    }
+}
+
+Describe 'Protection du répertoire de données' {
+    It 'retire les droits ajoutés avant Genesis et rétablit le propriétaire' -Tag Windows {
+        InModuleScope Genesis -Parameters @{ Root = (Join-Path $TestDrive 'acl-root') } {
+            param($Root)
+            $runs = Join-Path $Root 'runs'
+            New-Item -Path $runs -ItemType Directory -Force | Out-Null
+            $file = Join-Path $runs 'state.json'
+            Set-Content -LiteralPath $file -Value '{}'
+            $everyone = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')
+            foreach ($path in @($Root, $file)) {
+                $acl = Get-Acl -LiteralPath $path
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($everyone, 'FullControl', 'Allow')))
+                Set-Acl -LiteralPath $path -AclObject $acl
+            }
+
+            Protect-GenesisDataRoot -DataRoot $Root
+
+            $rootAcl = Get-Acl -LiteralPath $Root
+            $rootAcl.AreAccessRulesProtected | Should -BeTrue
+            $rootSids = @($rootAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value }) | Sort-Object -Unique
+            $rootSids | Should -Be @('S-1-5-18', 'S-1-5-32-544')
+            $fileAcl = Get-Acl -LiteralPath $file
+            @($fileAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])).Count | Should -Be 0
+            @($fileAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' }).Count | Should -Be 0
+            $fileAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value | Should -Be 'S-1-5-32-544'
+        }
+    }
+
+    It 'refuse une jonction dans le répertoire de données' -Tag Windows {
+        InModuleScope Genesis -Parameters @{ Root = (Join-Path $TestDrive 'acl-junction'); Target = (Join-Path $TestDrive 'ailleurs') } {
+            param($Root, $Target)
+            New-Item -Path $Root, $Target -ItemType Directory -Force | Out-Null
+            New-Item -Path (Join-Path $Root 'runs') -ItemType Junction -Value $Target | Out-Null
+            { Protect-GenesisDataRoot -DataRoot $Root } | Should -Throw '*jonction*'
+        }
+    }
+}

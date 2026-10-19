@@ -2,7 +2,7 @@
 
 Outil PowerShell de préparation Windows, avec menu de sélection, progression,
 inventaire local, sauvegardes et retour arrière des réglages compatibles.
-Version actuelle : **0.5.18**.
+Version actuelle : **0.5.19**.
 
 ## Démarrer depuis Internet
 
@@ -25,8 +25,9 @@ Les réglages ciblent principalement Windows 11 Pro et Famille ; les installateu
 x64 ne constituent pas une validation sur ARM64 ou sur Windows 32 bits.
 
 L'empreinte vérifie la cohérence des fichiers publiés. Le dépôt GitHub est la
-source de confiance du lanceur ; les exécutables Office ont aussi leur signature
-Microsoft vérifiée. Les stratégies de sécurité de l'organisation restent applicables.
+source de confiance du lanceur ; les installateurs téléchargés (Office, Chrome,
+Firefox, PDFCraft, NetBird) ont aussi la signature de leur éditeur vérifiée avant
+exécution. Les stratégies de sécurité de l'organisation restent applicables.
 
 ## Téléchargement manuel
 

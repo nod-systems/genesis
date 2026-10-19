@@ -42,7 +42,7 @@ $script:GenesisEmbeddedProfiles = @{
 }
 
 Set-StrictMode -Version Latest
-$script:GenesisVersion = '0.5.18'
+$script:GenesisVersion = '0.5.19'
 $script:GenesisConsoleProgressStepId = $null
 $script:GenesisConsoleProgressLineLength = 0
 
@@ -407,6 +407,45 @@ function Initialize-GenesisDataRoot {
     }
 }
 
+function Protect-GenesisDataRoot {
+    param([Parameter(Mandatory)][string]$DataRoot, [string]$LockPath)
+    if ($env:OS -ne 'Windows_NT') { return }
+    $administrators = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $root = New-Object System.IO.DirectoryInfo([System.IO.Path]::GetFullPath($DataRoot))
+    $pending = New-Object System.Collections.Generic.Queue[System.IO.FileSystemInfo]
+    $pending.Enqueue($root)
+    while ($pending.Count -gt 0) {
+        $item = $pending.Dequeue()
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Lien ou jonction interdit dans le répertoire de données Genesis : $($item.FullName)"
+        }
+        if ($LockPath -and $item.FullName -eq $LockPath) { continue }
+        try {
+            $security = $item.GetAccessControl()
+            $security.SetOwner($administrators)
+            foreach ($rule in @($security.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+                [void]$security.RemoveAccessRuleSpecific($rule)
+            }
+            if ($item -eq $root) {
+                # Racine : seules les règles SYSTEM et Administrateurs, sans héritage de ProgramData.
+                $security.SetAccessRuleProtection($true, $false)
+                foreach ($identity in @($system, $administrators)) {
+                    $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+                }
+            }
+            else { $security.SetAccessRuleProtection($false, $false) }
+            $item.SetAccessControl($security)
+        }
+        catch {
+            throw "Le répertoire de données Genesis n'a pas pu être protégé ($($item.FullName)) : $($_.Exception.Message). Le supprimer ou corriger ses droits avant de relancer Genesis."
+        }
+        if ($item -is [System.IO.DirectoryInfo]) {
+            foreach ($child in $item.GetFileSystemInfos()) { $pending.Enqueue($child) }
+        }
+    }
+}
+
 function Write-GenesisJson {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
     $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
@@ -628,7 +667,7 @@ function Open-GenesisRunLock {
     }
     $lockPath = Join-Path $root '.lock'
     try {
-        return [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+        $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
     }
     catch {
         $exception = $_.Exception
@@ -644,6 +683,14 @@ function Open-GenesisRunLock {
         }
         throw "Le verrou Genesis est inaccessible : $lockPath ($($exception.Message))"
     }
+    # Les sauvegardes sont relues avec les droits administrateur : le répertoire
+    # doit être protégé même s'il a été créé avant Genesis.
+    try { Protect-GenesisDataRoot -DataRoot $root -LockPath $lockPath }
+    catch {
+        $lock.Dispose()
+        throw
+    }
+    return $lock
 }
 
 function Start-GenesisRun {
@@ -1133,14 +1180,14 @@ function Show-GenesisDebloatMenu {
     param([string]$DataRoot)
     $programs = @(Get-GenesisInstalledProgram)
     $logPath = $null
-    if (-not [string]::IsNullOrWhiteSpace($DataRoot)) {
-        try {
-            $logDirectory = Join-Path $DataRoot 'debloat'
-            New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-            $logPath = Join-Path $logDirectory ((Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
-        }
-        catch { Write-Verbose ('Journal Debloat indisponible : ' + $_.Exception.Message) }
+    try {
+        $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
+        Initialize-GenesisDataRoot -DataRoot $root
+        $logDirectory = Join-Path $root 'debloat'
+        New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $logPath = Join-Path $logDirectory ((Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
     }
+    catch { Write-Host ('Journal Debloat indisponible : ' + $_.Exception.Message) -ForegroundColor Yellow }
     if ($programs.Count -eq 0) {
         Write-Host 'Aucun programme classique détecté dans les désinstallateurs Windows.' -ForegroundColor Yellow
         return
@@ -2356,13 +2403,19 @@ function Get-GenesisOfficeDeploymentToolUri {
     throw 'Téléchargement officiel de l''Office Deployment Tool Microsoft introuvable.'
 }
 
-function Assert-GenesisMicrosoftSignature {
-    param([Parameter(Mandatory)][string]$Path)
+function Assert-GenesisPublisherSignature {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Publisher)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
     if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
-        throw 'L''exécutable Office ne possède pas une signature Microsoft valide.'
+        $signature.SignerCertificate.Subject -notmatch ('(?:^|,\s*)O=' + [regex]::Escape($Publisher) + '(?:,|$)')) {
+        throw "L'installateur $([IO.Path]::GetFileName($Path)) ne possède pas une signature $Publisher valide ; programme non exécuté."
     }
+}
+
+function Assert-GenesisMicrosoftSignature {
+    param([Parameter(Mandatory)][string]$Path)
+    try { Assert-GenesisPublisherSignature -Path $Path -Publisher 'Microsoft Corporation' }
+    catch { throw 'L''exécutable Office ne possède pas une signature Microsoft valide.' }
 }
 
 function Install-GenesisOffice2024 {
@@ -2414,7 +2467,9 @@ function Install-GenesisBrowser {
     $uri = if ($browser -eq 'Chrome') { [uri]'https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi' } else { [uri]'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=fr' }
     $extension = if ($browser -eq 'Chrome') { '.msi' } else { '.exe' }
     $download = Save-GenesisDownload -Uri $uri -Path (Join-Path $softwareDirectory ("{0}-latest{1}" -f $browser.ToLowerInvariant(), $extension))
-    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'browser' -Percent 30 -Message ("{0} téléchargé ; SHA-256 {1}" -f $browser, $download.Sha256)
+    $publisher = if ($browser -eq 'Chrome') { 'Google LLC' } else { 'Mozilla Corporation' }
+    Assert-GenesisPublisherSignature -Path $download.Path -Publisher $publisher
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'browser' -Percent 30 -Message ("{0} téléchargé et signé par {1} ; SHA-256 {2}" -f $browser, $publisher, $download.Sha256)
     $result = if ($browser -eq 'Chrome') {
         Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /qn /norestart' -f $download.Path) -TimeoutSeconds 1800
     }
@@ -2455,6 +2510,8 @@ function Install-GenesisWingetPackage {
     param([Parameter(Mandatory)][string]$Id)
     if ($null -eq (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Status = 'NeedsAttention'; Message = 'winget.exe est indisponible ; installer le logiciel depuis sa source officielle.' } }
     $result = Invoke-GenesisNativeCommand -FilePath 'winget.exe' -Arguments ('install --id {0} --exact --silent --accept-package-agreements --accept-source-agreements' -f $Id) -TimeoutSeconds 1800
+    # 0x8A150061 : paquet déjà installé ; 0x8A15002B : aucune mise à jour applicable.
+    if ($result.ExitCode -in @(-1978335135, -1978335189)) { return [pscustomobject]@{ Status = 'Completed'; Message = "Paquet $Id déjà installé." } }
     if ($result.ExitCode -notin @(0, 3010, 1641)) { throw "winget a renvoyé le code $($result.ExitCode) pour $Id." }
     [pscustomobject]@{ Status = 'Completed'; Message = "Paquet $Id installé." }
 }
@@ -2462,7 +2519,8 @@ function Install-GenesisWingetPackage {
 function Get-GenesisPdfReaderPath {
     param([ValidateSet('Acrobat', 'SumatraPDF', 'PDFCraft')][string]$Reader)
     switch ($Reader) {
-        'Acrobat' { return Get-GenesisExecutablePath -Names @('AcroRd32.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe'), (Join-Path ${env:ProgramFiles(x86)} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe')) }
+        # Le paquet 64 bits installe le lecteur unifié Acrobat.exe ; AcroRd32.exe reste l'ancien lecteur 32 bits.
+        'Acrobat' { return Get-GenesisExecutablePath -Names @('Acrobat.exe', 'AcroRd32.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'Adobe\Acrobat DC\Acrobat\Acrobat.exe'), (Join-Path ${env:ProgramFiles} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe'), (Join-Path ${env:ProgramFiles(x86)} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe')) }
         'SumatraPDF' { return Get-GenesisExecutablePath -Names @('SumatraPDF.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'SumatraPDF\SumatraPDF.exe'), (Join-Path ${env:ProgramFiles(x86)} 'SumatraPDF\SumatraPDF.exe'), (Join-Path $env:LOCALAPPDATA 'SumatraPDF\SumatraPDF.exe')) }
         'PDFCraft' {
             $known = Get-GenesisExecutablePath -Names @('pdfcraft.exe', 'PDFCraft.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'PDFCraft\pdfcraft.exe'), (Join-Path ${env:ProgramFiles(x86)} 'PDFCraft\pdfcraft.exe'))
@@ -2498,6 +2556,7 @@ function Install-GenesisPdfReader {
     }
     if ($reader -eq 'PDFCraft') {
         $download = Save-GenesisDownload -Uri $uri -Path (Join-Path $softwareDirectory $fileName) -ExpectedSha256 $sha256
+        Assert-GenesisPublisherSignature -Path $download.Path -Publisher 'Learning Machines Inc'
         $install = Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /qn /norestart INSTALLDESKTOPSHORTCUT=0' -f $download.Path) -TimeoutSeconds 1800
         if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "Installation PDFCraft impossible (code $($install.ExitCode))." }
     }
@@ -2623,6 +2682,7 @@ function Install-GenesisNetBird {
     if ([string]::IsNullOrWhiteSpace($executable)) {
         $installerPath = Join-Path $softwareDirectory 'netbird-latest.msi'
         $download = Save-GenesisDownload -Uri ([uri]$script:GenesisNetBirdMsiUri) -Path $installerPath
+        Assert-GenesisPublisherSignature -Path $download.Path -Publisher 'NetBird GmbH'
         Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'netbird' -Percent 30 -Message 'Installateur NetBird téléchargé ; installation silencieuse'
         $install = Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /quiet /norestart' -f $download.Path) -TimeoutSeconds 1800
         if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "Installation NetBird impossible (code $($install.ExitCode))." }

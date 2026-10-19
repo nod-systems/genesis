@@ -191,7 +191,7 @@ Describe 'Choix des preparations pour Reverse' {
             New-Item -Path $directory -ItemType Directory -Force | Out-Null
             $state = [pscustomobject]@{
                 SchemaVersion = 1
-                GenesisVersion = '0.5.18'
+                GenesisVersion = '0.5.19'
                 RunId = $runId
                 MachineId = 'machine-fictive'
                 UserSid = 'S-1-5-21-test'
