@@ -1,5 +1,5 @@
 ﻿Set-StrictMode -Version Latest
-$script:GenesisVersion = '0.5.20'
+$script:GenesisVersion = '1.0.0'
 $script:GenesisConsoleProgressStepId = $null
 $script:GenesisConsoleProgressLineLength = 0
 

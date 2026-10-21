@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "sha256": {
-    "Genesis-Portable.ps1": "a1cec6a6f6b4bf52f6d82d34e2210801f97592198b136b5ece4bd3a9d87db3de"
+    "Genesis-Portable.ps1": "1b8f63eb4323d47045cbd6ba0a8dc99473d909803a980225e0abba1699ae01ae"
   },
-  "version": "0.5.20"
+  "version": "1.0.0"
 }

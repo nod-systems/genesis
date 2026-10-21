@@ -12,6 +12,7 @@ PUBLIC_SOURCE_FILES = (
     ".gitattributes",
     ".gitignore",
     ".github/workflows/validate.yml",
+    "CHANGELOG.md",
     "Genesis.ps1",
     "install.ps1",
     "PSScriptAnalyzerSettings.psd1",

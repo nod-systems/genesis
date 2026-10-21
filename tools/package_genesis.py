@@ -17,6 +17,7 @@ RELEASE_FILES = (
     "profiles/windows.json",
     "install.ps1",
     "README.md",
+    "CHANGELOG.md",
 )
 
 PORTABLE_PROFILE_FILES = {

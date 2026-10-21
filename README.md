@@ -2,7 +2,7 @@
 
 Outil PowerShell de préparation Windows, avec menu de sélection, progression,
 inventaire local, sauvegardes et retour arrière des réglages compatibles.
-Version actuelle : **0.5.20**.
+Version actuelle : **1.0.0** ([historique des versions](CHANGELOG.md)).
 
 ## Démarrer depuis Internet
 
@@ -90,8 +90,9 @@ Les journaux, inventaires et sauvegardes restent sur le poste, sous
 poste et doivent être conservés comme données privées. Genesis n'envoie aucun
 inventaire à un service de collecte.
 
-Chaque préparation possède un `RunId`. Après un redémarrage demandé par Windows,
-relancer le programme puis reprendre avec cet identifiant :
+Chaque préparation possède un `RunId`. Windows Update reprend seul après
+redémarrage (voir plus bas). Pour consulter, reprendre manuellement ou restaurer
+une préparation, utiliser cet identifiant :
 
 ```powershell
 .\Genesis-Portable.ps1 -Action Status -RunId IDENTIFIANT
