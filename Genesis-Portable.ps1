@@ -3787,9 +3787,12 @@ function Invoke-GenesisFogApi {
         ErrorAction = 'Stop'
     }
     if ($null -ne $Body) {
-        $request.Body = $Body | ConvertTo-Json -Depth 6 -Compress
-        $request.ContentType = 'application/json'
+        # Windows PowerShell 5.1 n'encode pas le texte en UTF-8 par défaut : on envoie les octets.
+        $request.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 6 -Compress))
+        $request.ContentType = 'application/json; charset=utf-8'
     }
+    # .NET Framework ajoute « Expect: 100-continue », que certains serveurs refusent (417).
+    try { [System.Net.ServicePointManager]::Expect100Continue = $false } catch { Write-Verbose 'Réglage Expect100Continue indisponible.' }
     try { $response = Invoke-RestMethod @request }
     catch {
         $status = 0
@@ -3798,7 +3801,14 @@ function Invoke-GenesisFogApi {
             throw 'FOG refuse les clés d''API : vérifier la clé FOG, la clé utilisateur et que l''API est activée dans FOG.'
         }
         $reason = ([string]$_.Exception.Message -replace '[\r\n\t]+', ' ').Trim()
-        throw ('Réponse FOG refusée ou serveur injoignable ({0} {1}) : {2}' -f $Method, $Path, $reason)
+        # Le corps de la réponse porte le motif donné par FOG (champ refusé, nom déjà pris...).
+        $detail = ''
+        if ($null -ne $_.ErrorDetails -and -not [string]::IsNullOrWhiteSpace([string]$_.ErrorDetails.Message)) {
+            $detail = ([string]$_.ErrorDetails.Message -replace '<[^>]+>', ' ' -replace '\s+', ' ').Trim()
+            if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 297) + '...' }
+            $detail = ' | FOG : ' + $detail
+        }
+        throw ('Réponse FOG refusée ou serveur injoignable ({0} {1}) : {2}{3}' -f $Method, $Path, $reason, $detail)
     }
     # API désactivée ou clés inconnues : FOG redirige vers sa page de connexion au lieu de répondre en JSON.
     if ($response -is [string] -and $response -match '(?i)<html|<!doctype') {
@@ -3853,7 +3863,7 @@ function New-GenesisFogImage {
     $path = $Settings.ImageName -replace '[^A-Za-z0-9_-]', ''
     if ([string]::IsNullOrWhiteSpace($path)) { throw 'Nom d''image FOG invalide : utiliser des lettres, chiffres, tirets ou soulignés.' }
     $body = [ordered]@{
-        name = $Settings.ImageName; path = $path; description = 'Créée par Genesis'
+        name = $Settings.ImageName; path = $path; description = 'Genesis'
         osID = [int]$os.id; imageTypeID = [int]$type.id; imagePartitionTypeID = [int]$partition.id
         isEnabled = 1; toReplicate = 1; storagegroups = @([int]$group.id)
     }
