@@ -1,5 +1,24 @@
 # Historique des versions
 
+## Non publié
+
+- Progression affichée en tableau : une ligne par opération, avec état et
+  pourcentage mis à jour sur place.
+- Office : la recherche du lien ODT ne plante plus sur les liens sans `href`
+  de la page Microsoft.
+- Windows Update et la mise à niveau s'exécutent en dernier ; la mise à niveau
+  attend le redémarrage quand les correctifs en demandent un.
+- Redémarrage automatique (60 s, annulable par `shutdown /a`) puis reprise au
+  démarrage, sans question au technicien.
+- Libellé plus clair pour la veille sur secteur : « Mise en veille sur secteur : Jamais ».
+- Nouvelle opération **Nettoyer le menu Démarrer** (`start-cleanup`) : désinstalle
+  Outlook (new), Xbox, Solitaire, WhatsApp et LinkedIn, y compris leurs épingles
+  « à installer » du menu Démarrer.
+- Nouvelle opération **Barre des tâches à gauche** (`taskbar-left`) : alignement à
+  gauche et retrait des épingles Edge et Microsoft Store.
+- Nouveau choix de menu **Désinstaller Genesis** : supprime toutes les traces de
+  Genesis sur le poste après confirmation, sans défaire les personnalisations.
+
 ## 1.0.0
 
 Première version stable de Genesis.

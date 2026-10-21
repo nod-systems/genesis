@@ -36,7 +36,7 @@ $script:GenesisEmbeddedProfiles = @{
     "schemaVersion": 1,
     "id": "windows",
     "name": "Personnalisations Windows",
-    "steps": ["windows-update", "windows-feature-update", "explorer-home", "windows-suggestions", "tray-icons", "taskbar-controls", "time-sync", "office-2024", "browser", "pdf-reader", "outlook-autodiscover", "power-ac", "local-user", "netbird", "taskbar-pins"]
+    "steps": ["explorer-home", "windows-suggestions", "tray-icons", "taskbar-controls", "taskbar-left", "start-cleanup", "time-sync", "office-2024", "browser", "pdf-reader", "outlook-autodiscover", "power-ac", "local-user", "netbird", "taskbar-pins", "windows-update", "windows-feature-update"]
 }
 '@
 }
@@ -49,24 +49,36 @@ function Get-GenesisStepCatalog {
     param()
     foreach ($entry in @(
         @('inventory', 'Identifier le matériel et Windows', 'Machine', $false, $false),
-        @('windows-update', 'Mettre à jour Windows + les mises à jour facultatives', 'Machine', $true, $false),
-        @('windows-feature-update', 'Mettre à niveau Windows vers la dernière version proposée (ex. 26H2)', 'Machine', $true, $false),
         @('explorer-home', 'Ouvrir l''Explorateur sur Ce PC', 'Utilisateur', $true, $true),
         @('windows-suggestions', 'Désactiver les conseils et suggestions Windows', 'Utilisateur', $true, $true),
         @('tray-icons', 'Afficher les icônes de notification présentes', 'Utilisateur', $true, $true),
         @('taskbar-controls', 'Masquer Recherche, Widgets et Vue des tâches', 'Machine et utilisateur', $true, $true),
+        @('taskbar-left', 'Barre des tâches à gauche, sans Edge ni Microsoft Store', 'Utilisateur', $true, $true),
+        @('start-cleanup', 'Nettoyer le menu Démarrer : Outlook (new), Xbox, Solitaire, WhatsApp, LinkedIn', 'Machine et utilisateur', $true, $false),
         @('time-sync', 'Mettre Windows à l''heure', 'Machine', $true, $true),
         @('office-2024', 'Installer et vérifier Office Standard 2024 LTSC français', 'Machine', $true, $false),
         @('browser', 'Installer Chrome ou Firefox et préparer le navigateur par défaut', 'Machine et utilisateur', $true, $false),
         @('pdf-reader', 'Installer Acrobat Reader, SumatraPDF ou PDFCraft', 'Machine et utilisateur', $true, $false),
         @('outlook-autodiscover', 'Exclure le point de terminaison Microsoft 365 dans Outlook classique', 'Utilisateur', $true, $true),
-        @('power-ac', 'Désactiver la mise en veille lorsque le poste est sur secteur', 'Machine', $true, $true),
+        @('power-ac', 'Mise en veille sur secteur : Jamais', 'Machine', $true, $true),
         @('local-user', 'Proposer la création d''une session utilisateur locale', 'Machine et utilisateur', $true, $true),
         @('netbird', 'Télécharger NetBird et configurer son serveur (sans connexion)', 'Machine', $true, $false),
-        @('taskbar-pins', 'Épingler Explorateur, Word, Excel, PowerPoint, Outlook classique', 'Utilisateur', $true, $true)
+        @('taskbar-pins', 'Épingler Explorateur, Word, Excel, PowerPoint, Outlook classique', 'Utilisateur', $true, $true),
+        @('windows-update', 'Mettre à jour Windows + les mises à jour facultatives', 'Machine', $true, $false),
+        @('windows-feature-update', 'Mettre à niveau Windows vers la dernière version proposée (ex. 26H2)', 'Machine', $true, $false)
     )) {
         [pscustomobject]@{ Id = $entry[0]; Name = $entry[1]; Context = $entry[2]; ChangesMachine = $entry[3]; Reversible = $entry[4] }
     }
+}
+
+function Get-GenesisStepOrder {
+    param([AllowEmptyCollection()][object[]]$Steps = @())
+    # Windows Update et la mise à niveau sont très longs et peuvent redémarrer le poste : toujours en dernier.
+    $updateIds = @('windows-update', 'windows-feature-update')
+    $idOf = { param($item) if ($item -is [string]) { $item } else { [string]$item.Id } }
+    $others = @($Steps | Where-Object { (& $idOf $_) -notin $updateIds })
+    $updates = foreach ($id in $updateIds) { $Steps | Where-Object { (& $idOf $_) -ceq $id } }
+    return @($others) + @($updates)
 }
 
 function Assert-GenesisProfileObject {
@@ -130,7 +142,7 @@ function Get-GenesisPlan {
     )
     $genesisProfile = Get-GenesisProfile -Path $ProfilePath -ProfileObject $ProfileObject
     $catalog = @(Get-GenesisStepCatalog)
-    $steps = @($genesisProfile.steps | ForEach-Object {
+    $steps = @(Get-GenesisStepOrder -Steps @($genesisProfile.steps) | ForEach-Object {
         $id = $_
         $catalog | Where-Object { $_.Id -ceq $id }
     })
@@ -597,9 +609,19 @@ function Invoke-GenesisRunExecution {
     Write-GenesisJson -Path $path -Value $State
     Write-GenesisConsoleProgress -State $State
     Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'run_started'
+    # Les préparations créées avant ce changement gardent leur ordre enregistré : on réordonne à l'exécution.
+    $State.Steps = @(Get-GenesisStepOrder -Steps @($State.Steps))
     foreach ($step in $State.Steps) {
         if ($step.Status -eq 'Completed') {
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }
+            continue
+        }
+        if ($step.Id -eq 'windows-feature-update' -and
+            @($State.Steps | Where-Object { $_.Id -eq 'windows-update' -and $_.Status -eq 'NeedsAttention' }).Count -gt 0) {
+            # La mise à niveau attend que les correctifs installés soient finalisés par le redémarrage.
+            $step.Message = 'En attente du redémarrage des mises à jour Windows.'
+            Write-GenesisJson -Path $path -Value $State
+            Write-GenesisConsoleProgress -State $State
             continue
         }
         $step.Status = 'Running'; $step.Percent = 10; $step.Message = 'Sauvegarde et exécution'
@@ -726,7 +748,7 @@ function Start-GenesisRun {
             FinishedAt = $null
             Status = 'Pending'
             Choices = (Assert-GenesisChoice -Choices $Choices)
-            Steps = @($genesisProfile.steps | ForEach-Object {
+            Steps = @(Get-GenesisStepOrder -Steps @($genesisProfile.steps) | ForEach-Object {
                 [pscustomobject]@{ Id = $_; Status = 'Pending'; Attempts = 0; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 0; Message = ''; UndoStatus = 'NotAvailable' }
             })
         }
@@ -763,6 +785,7 @@ function Resume-GenesisRun {
 
 $script:GenesisUpdateTaskName = 'Genesis - reprise Windows Update'
 $script:GenesisUpdateMaxReboots = 8
+$script:GenesisUpdateRestartDelaySeconds = 60
 
 function Get-GenesisPortablePath {
     # Renseigné par Genesis-Portable.ps1 : le mode module n'a pas de fichier unique à relancer.
@@ -976,14 +999,17 @@ function Request-GenesisUpdateRestart {
         Write-Host ('Windows Update doit être repris après redémarrage : -Action Resume -RunId ' + $State.RunId) -ForegroundColor Yellow
         return
     }
-    $answer = Read-Host 'Windows Update demande un redémarrage. Redémarrer et poursuivre automatiquement les mises à jour [O/N]'
-    if ($answer -notmatch '^[OoYy]$') {
-        Write-Host ('Reprise manuelle possible : -Action Resume -RunId ' + $State.RunId) -ForegroundColor Yellow
+    # Redémarrage automatique : la reprise est programmée avant, puis Windows redémarre après un délai annulable.
+    try { Register-GenesisUpdateContinuation -RunId $State.RunId -DataRoot $DataRoot | Out-Null }
+    catch {
+        Write-Host ('Reprise automatique impossible : ' + $_.Exception.Message) -ForegroundColor Yellow
+        Write-Host ('Redémarrer puis reprendre manuellement : -Action Resume -RunId ' + $State.RunId) -ForegroundColor Yellow
         return
     }
-    Register-GenesisUpdateContinuation -RunId $State.RunId -DataRoot $DataRoot | Out-Null
-    Restart-GenesisComputer -DelaySeconds 30 -Reason 'Genesis redémarre pour poursuivre les mises à jour Windows.'
-    Write-Host ('Redémarrage dans 30 secondes. Les mises à jour reprendront au démarrage, sans ouverture de session (au plus {0} redémarrages).' -f $script:GenesisUpdateMaxReboots) -ForegroundColor Green
+    Restart-GenesisComputer -DelaySeconds $script:GenesisUpdateRestartDelaySeconds -Reason 'Genesis redémarre pour poursuivre les mises à jour Windows.'
+    Write-Host ('Windows Update demande un redémarrage : redémarrage automatique dans {0} secondes.' -f $script:GenesisUpdateRestartDelaySeconds) -ForegroundColor Green
+    Write-Host ('Les mises à jour reprendront seules au démarrage, sans ouverture de session (au plus {0} redémarrages) ; un message s''affichera à la fin.' -f $script:GenesisUpdateMaxReboots) -ForegroundColor Green
+    Write-Host 'Pour annuler ce redémarrage : shutdown /a (la reprise aura lieu au prochain démarrage).' -ForegroundColor DarkGray
 }
 
 function Write-GenesisBanner {
@@ -1107,6 +1133,17 @@ function Get-GenesisStepCompletion {
                 $icons = @(Get-ChildItem -LiteralPath 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue)
                 $done = ($icons.Count -eq 0) -or (@($icons | ForEach-Object { (Get-GenesisRegistryValue -Path ('HKCU:\Control Panel\NotifyIconSettings\' + $_.PSChildName) -Name 'IsPromoted') } | Where-Object { -not $_.Exists -or $_.Kind -ne 'DWord' -or [int]$_.Data -ne 1 }).Count -eq 0)
                 $detail = if ($done) { 'Toutes les icônes actuellement enregistrées sont affichées.' } else { 'Certaines icônes de notification restent masquées.' }
+            }
+            'taskbar-left' {
+                $done = (Test-GenesisCompletionRegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarAl' -Expected 0) -and
+                    (@(Get-GenesisTaskbarPinnedApp -Names @('Microsoft Edge', 'Microsoft Store')).Count -eq 0)
+                $detail = if ($done) { 'Barre à gauche, sans Edge ni Microsoft Store.' } else { 'Barre centrée ou Edge / Microsoft Store encore épinglés.' }
+            }
+            'start-cleanup' {
+                $left = @(Get-GenesisStartCleanupInstalled | ForEach-Object { $script:GenesisStartCleanupPackages[$_.Name] } | Select-Object -Unique)
+                $left += @(Get-GenesisStartCleanupPin | ForEach-Object { 'épingle ' + $_ })
+                $done = $left.Count -eq 0
+                $detail = if ($done) { 'Outlook (new), Xbox, Solitaire, WhatsApp et LinkedIn absents.' } else { 'Encore installé : ' + ($left -join ', ') }
             }
             'taskbar-controls' {
                 $widgets = Get-GenesisRegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests'
@@ -1605,6 +1642,88 @@ function Show-GenesisPrinterMenu {
     }
 }
 
+function Get-GenesisFootprint {
+    [CmdletBinding()]
+    param([string]$DataRoot)
+    # Traces propres à Genesis ; les personnalisations appliquées au poste ne sont pas listées.
+    $items = @()
+    $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
+    if (Test-Path -LiteralPath $root) { $items += [pscustomobject]@{ Kind = 'Folder'; Path = $root; Label = 'Données, sauvegardes Reverse, installeurs et journaux' } }
+    if ($null -ne (Get-ScheduledTask -TaskName $script:GenesisUpdateTaskName -ErrorAction SilentlyContinue)) {
+        $items += [pscustomobject]@{ Kind = 'Task'; Path = $script:GenesisUpdateTaskName; Label = 'Tâche planifiée de reprise Windows Update' }
+    }
+    $profiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Special -and $_.LocalPath })
+    foreach ($userProfile in $profiles) {
+        $folder = Join-Path $userProfile.LocalPath 'AppData\Local\Genesis'
+        if (Test-Path -LiteralPath $folder) { $items += [pscustomobject]@{ Kind = 'Folder'; Path = $folder; Label = 'Fichiers de session Genesis' } }
+    }
+    $policy = Get-GenesisRegistryValue -Path 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Name 'StartLayoutFile'
+    if ($policy.Exists -and [string]$policy.Data -match '\\Genesis\\') {
+        $items += [pscustomobject]@{ Kind = 'TaskbarPolicy'; Path = [string]$policy.Data; Label = 'Stratégie de disposition de la barre des tâches pointant vers Genesis' }
+    }
+    $portable = Get-GenesisPortablePath
+    if (-not [string]::IsNullOrWhiteSpace($portable) -and (Test-Path -LiteralPath $portable)) {
+        $drive = try { [IO.DriveInfo]::new([IO.Path]::GetPathRoot($portable)) } catch { $null }
+        if ($null -eq $drive -or $drive.DriveType -ne [IO.DriveType]::Removable) {
+            $items += [pscustomobject]@{ Kind = 'File'; Path = $portable; Label = 'Programme Genesis lancé' }
+        }
+    }
+    return @($items)
+}
+
+function Uninstall-GenesisFootprint {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param([string]$DataRoot)
+    Assert-GenesisAdministrator
+    $items = @(Get-GenesisFootprint -DataRoot $DataRoot)
+    if ($items.Count -eq 0) { return [pscustomobject]@{ Removed = @(); Failed = @(); Message = 'Aucune trace de Genesis sur ce poste.' } }
+    if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Supprimer toutes les traces de Genesis')) { return }
+    $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
+    # Le verrou garantit qu'aucune préparation ni reprise n'est en cours pendant la suppression.
+    $lock = $null
+    if (Test-Path -LiteralPath $root) { $lock = Open-GenesisRunLock -DataRoot $root }
+    $removed = @(); $failed = @()
+    try {
+        foreach ($item in @($items | Where-Object Kind -eq 'Task')) {
+            try { Unregister-GenesisUpdateContinuation; $removed += $item.Label } catch { $failed += $item.Label }
+        }
+        foreach ($item in @($items | Where-Object Kind -eq 'TaskbarPolicy')) {
+            try {
+                Remove-ItemProperty -LiteralPath 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Name 'StartLayoutFile', 'LockedStartLayout' -ErrorAction Stop
+                $removed += $item.Label
+            }
+            catch { $failed += $item.Label }
+        }
+    }
+    finally { if ($null -ne $lock) { $lock.Dispose() } }
+    foreach ($item in @($items | Where-Object { $_.Kind -in @('Folder', 'File') })) {
+        try {
+            Remove-Item -LiteralPath $item.Path -Recurse -Force -ErrorAction Stop
+            $removed += ('{0} ({1})' -f $item.Label, $item.Path)
+        }
+        catch { $failed += ('{0} ({1})' -f $item.Label, $item.Path) }
+    }
+    $message = if ($failed.Count -eq 0) { 'Genesis a été entièrement retiré de ce poste. Les personnalisations appliquées sont conservées.' } else { 'Genesis a été retiré, sauf : ' + ($failed -join ' ; ') }
+    [pscustomobject]@{ Removed = $removed; Failed = $failed; Message = $message }
+}
+
+function Show-GenesisUninstall {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Confirmation console du technicien.')]
+    param([string]$DataRoot)
+    $items = @(Get-GenesisFootprint -DataRoot $DataRoot)
+    if ($items.Count -eq 0) { Write-Host 'Aucune trace de Genesis sur ce poste.' -ForegroundColor Green; return $false }
+    Write-Host 'Désinstaller Genesis supprimera :' -ForegroundColor Yellow
+    foreach ($item in $items) { Write-Host ('  - {0} : {1}' -f $item.Label, $item.Path) -ForegroundColor Yellow }
+    Write-Host 'Les personnalisations, logiciels et comptes créés restent en place.' -ForegroundColor DarkGray
+    Write-Host 'Attention : les sauvegardes sont supprimées, Reverse ne sera plus possible.' -ForegroundColor Red
+    $answer = Read-Host 'Taper OUI pour confirmer'
+    if ($answer -cne 'OUI') { Write-Host 'Désinstallation annulée.' -ForegroundColor DarkGray; return $false }
+    $result = Uninstall-GenesisFootprint -DataRoot $DataRoot -Confirm:$false
+    $color = if ($result.Failed.Count -eq 0) { 'Green' } else { 'Yellow' }
+    Write-Host $result.Message -ForegroundColor $color
+    return ($result.Failed.Count -eq 0)
+}
+
 function Get-GenesisMainMenuEntry {
     [CmdletBinding()]
     param()
@@ -1613,6 +1732,7 @@ function Get-GenesisMainMenuEntry {
         [pscustomobject]@{ Id = '2'; Label = 'Reverse des personnalisations'; Color = 'Magenta' }
         [pscustomobject]@{ Id = '3'; Label = 'Debloat : afficher et désinstaller des programmes'; Color = 'Red' }
         [pscustomobject]@{ Id = '4'; Label = 'Imprimantes réseau : choisir et rechercher les pilotes Google'; Color = 'Cyan' }
+        [pscustomobject]@{ Id = '5'; Label = 'Désinstaller Genesis : supprimer toutes ses traces sur ce poste'; Color = 'DarkYellow' }
         [pscustomobject]@{ Id = '0'; Label = 'Quitter'; Color = 'DarkGray' }
     )
 }
@@ -1652,6 +1772,12 @@ function Show-GenesisMenu {
                 }
                 '3' { Show-GenesisDebloatMenu -DataRoot $DataRoot | Out-Host }
                 '4' { Show-GenesisPrinterMenu }
+                '5' {
+                    if (Show-GenesisUninstall -DataRoot $DataRoot) {
+                        Read-Host 'Entrée pour quitter' | Out-Null
+                        $choice = '0'
+                    }
+                }
                 '0' { Clear-Host }
                 default { Write-Host 'Choix invalide.' -ForegroundColor Yellow }
             }
@@ -1668,7 +1794,7 @@ function Get-GenesisUserSid {
 function Assert-GenesisRegistryTarget {
     param([string]$Path, [string]$Name)
     $allowed = @{
-        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' = @('LaunchTo', 'TaskbarDa', 'ShowTaskViewButton')
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' = @('LaunchTo', 'TaskbarDa', 'ShowTaskViewButton', 'TaskbarAl')
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' = @('SearchboxTaskbarMode')
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' = @('SubscribedContent-338389Enabled')
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' = @('ScoobeSystemSettingEnabled')
@@ -1921,6 +2047,141 @@ function Set-GenesisTaskbarLayout {
         Invoke-GenesisRegistryTransaction -Changes $changes -SnapshotPath (Join-Path $RunDirectory 'taskbar-pins.registry.json')
     }
     [pscustomobject]@{ Status = 'AwaitingSession'; Percent = 80; Message = 'Disposition préparée. Vérifier les 5 épingles dans la session ; retirer les anciennes épingles utilisateur puis valider.' }
+}
+
+# Applications retirées par le nettoyage du menu Démarrer (noms de paquets Appx).
+$script:GenesisStartCleanupPackages = [ordered]@{
+    'Microsoft.OutlookForWindows' = 'Outlook (new)'
+    'Microsoft.GamingApp' = 'Xbox'
+    'Microsoft.XboxApp' = 'Xbox'
+    'Microsoft.XboxGamingOverlay' = 'Xbox Game Bar'
+    'Microsoft.XboxGameOverlay' = 'Xbox Game Bar'
+    'Microsoft.XboxSpeechToTextOverlay' = 'Xbox Game Bar'
+    'Microsoft.Xbox.TCUI' = 'Xbox'
+    'Microsoft.MicrosoftSolitaireCollection' = 'Solitaire'
+    '5319275A.WhatsAppDesktop' = 'WhatsApp'
+    '7EE7776C.LinkedInforWindows' = 'LinkedIn'
+}
+
+function Get-GenesisStartCleanupInstalled {
+    $names = @($script:GenesisStartCleanupPackages.Keys)
+    @(Get-AppxPackage -ErrorAction Stop | Where-Object { $_.Name -in $names -and -not $_.NonRemovable })
+}
+
+function Get-GenesisStartCleanupPin {
+    # Épingles du menu Démarrer visées par le nettoyage (y compris les raccourcis « à installer »).
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('genesis-start-' + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        Export-StartLayout -Path $path -ErrorAction Stop
+        $pattern = '^(' + ((@($script:GenesisStartCleanupPackages.Keys) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')_'
+        @((Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).pinnedList | Where-Object { $_.PSObject.Properties.Name -contains 'packagedAppId' -and [string]$_.packagedAppId -match $pattern } | ForEach-Object {
+            $script:GenesisStartCleanupPackages[([string]$_.packagedAppId -split '_')[0]]
+        } | Select-Object -Unique)
+    }
+    catch { @() }
+    finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-GenesisStartPin {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    # Les raccourcis « à installer » (WhatsApp, LinkedIn…) n'ont pas de commande Désépingler :
+    # on réapplique une seule fois la liste actuelle sans eux (ConfigureStartPins + applyOnce), puis on retire la stratégie.
+    $key = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
+    $existing = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and ($existing.PSObject.Properties.Name -contains 'ConfigureStartPins' -or $existing.PSObject.Properties.Name -contains 'ConfigureStartPinsJSON')) {
+        return 'Épingles gérées par une stratégie existante : non modifiées.'
+    }
+    $folder = Join-Path $env:LOCALAPPDATA ('Genesis\StartPins\' + (Split-Path -Leaf $RunDirectory))
+    New-Item -Path $folder -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $before = Join-Path $folder 'avant.json'
+    Export-StartLayout -Path $before -ErrorAction Stop
+    $layout = Get-Content -LiteralPath $before -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pattern = '^(' + ((@($script:GenesisStartCleanupPackages.Keys) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')_'
+    $all = @($layout.pinnedList)
+    $kept = @($all | Where-Object { -not ($_.PSObject.Properties.Name -contains 'packagedAppId' -and [string]$_.packagedAppId -match $pattern) })
+    if ($kept.Count -eq $all.Count) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue; return 'Aucune épingle à retirer du menu Démarrer.' }
+    $pinsPath = Join-Path $folder 'epingles.json'
+    $json = [pscustomobject]@{ applyOnce = $true; pinnedList = $kept } | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::WriteAllText($pinsPath, $json, (New-Object Text.UTF8Encoding($false)))
+    try {
+        New-Item -Path $key -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $key -Name 'ConfigureStartPins' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $key -Name 'ConfigureStartPinsJSON' -PropertyType ExpandString -Value $pinsPath -Force -ErrorAction Stop | Out-Null
+        Get-Process -Name StartMenuExperienceHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+    }
+    finally {
+        Remove-ItemProperty -LiteralPath $key -Name 'ConfigureStartPins', 'ConfigureStartPinsJSON' -ErrorAction SilentlyContinue
+        Get-Process -Name StartMenuExperienceHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 3
+    $after = Join-Path $folder 'apres.json'
+    Export-StartLayout -Path $after -ErrorAction Stop
+    $left = @((Get-Content -LiteralPath $after -Raw -Encoding UTF8 | ConvertFrom-Json).pinnedList | Where-Object { $_.PSObject.Properties.Name -contains 'packagedAppId' -and [string]$_.packagedAppId -match $pattern })
+    Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    if ($left.Count -gt 0) { throw 'Les épingles du menu Démarrer n''ont pas pu être retirées.' }
+    return ('{0} épingle(s) retirée(s) du menu Démarrer.' -f ($all.Count - $kept.Count))
+}
+
+function Invoke-GenesisStartCleanup {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    $names = @($script:GenesisStartCleanupPackages.Keys)
+    $installed = @(Get-GenesisStartCleanupInstalled)
+    $removed = @(); $failed = @()
+    $index = 0
+    foreach ($package in $installed) {
+        $index++
+        $label = $script:GenesisStartCleanupPackages[$package.Name]
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'start-cleanup' -Percent ([int](10 + 60 * $index / [math]::Max(1, $installed.Count))) -Message ('Désinstallation : ' + $label)
+        try { Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop; $removed += $label }
+        catch { $failed += $label; Write-Verbose ('Désinstallation impossible : ' + $package.Name + ' : ' + $_.Exception.Message) }
+    }
+    # Retrait des applications préinstallées : les comptes créés ensuite ne les reçoivent plus.
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'start-cleanup' -Percent 80 -Message 'Retrait des applications préinstallées pour les nouveaux comptes'
+    foreach ($provisioned in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { $_.DisplayName -in $names })) {
+        try { Remove-AppxProvisionedPackage -Online -PackageName $provisioned.PackageName -ErrorAction Stop | Out-Null }
+        catch { $failed += $script:GenesisStartCleanupPackages[$provisioned.DisplayName]; Write-Verbose ('Retrait préinstallé impossible : ' + $provisioned.DisplayName) }
+    }
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'start-cleanup' -Percent 90 -Message 'Retrait des épingles WhatsApp, LinkedIn et des applications désinstallées'
+    $pinText = try { ' ' + (Remove-GenesisStartPin -RunDirectory $RunDirectory) } catch { $failed += 'épingles'; ' Épingles du menu Démarrer à retirer à la main : ' + $_.Exception.Message }
+    $remaining = @(Get-GenesisStartCleanupInstalled | ForEach-Object { $script:GenesisStartCleanupPackages[$_.Name] } | Select-Object -Unique)
+    $removedText = if ($removed.Count -gt 0) { 'Désinstallé : ' + ((@($removed) | Select-Object -Unique) -join ', ') + '.' } else { 'Aucune de ces applications n''était installée.' }
+    if ($remaining.Count -gt 0) {
+        return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 90; Message = $removedText + ' Toujours présent : ' + ($remaining -join ', ') + '.' + $pinText }
+    }
+    if ($failed -contains 'épingles') { return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 90; Message = $removedText + $pinText } }
+    [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = $removedText + $pinText + ' Non réversible : réinstaller depuis le Microsoft Store si besoin.' }
+}
+
+function Get-GenesisTaskbarPinnedApp {
+    param([Parameter(Mandatory)][string[]]$Names)
+    # Le verbe « Désépingler de la barre des tâches » n'est proposé que pour les applications épinglées.
+    $shell = New-Object -ComObject Shell.Application
+    $folder = $shell.NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}')
+    if ($null -eq $folder) { return @() }
+    foreach ($item in @($folder.Items())) {
+        if ([string]$item.Name -notin $Names) { continue }
+        $verb = @($item.Verbs()) | Where-Object { ([string]$_.Name -replace '&', '') -match '^(Désépingler de la barre des tâches|Unpin from taskbar)$' } | Select-Object -First 1
+        if ($null -ne $verb) { [pscustomobject]@{ Name = [string]$item.Name; Verb = $verb } }
+    }
+}
+
+function Set-GenesisTaskbarLeft {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'taskbar-left' -Percent 20 -Message 'Sauvegarde et alignement de la barre des tâches à gauche'
+    $change = [pscustomobject]@{ Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Name = 'TaskbarAl'; Kind = 'DWord'; Data = 0 }
+    Invoke-GenesisRegistryTransaction -Changes @($change) -SnapshotPath (Join-Path $RunDirectory 'taskbar-left.registry.json')
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'taskbar-left' -Percent 50 -Message 'Retrait des épingles Edge et Microsoft Store'
+    $names = @('Microsoft Edge', 'Microsoft Store')
+    foreach ($pin in @(Get-GenesisTaskbarPinnedApp -Names $names)) {
+        try { $pin.Verb.DoIt() } catch { Write-Verbose ('Désépinglage impossible : ' + $pin.Name) }
+    }
+    Start-Sleep -Milliseconds 800
+    $remaining = @(Get-GenesisTaskbarPinnedApp -Names $names | ForEach-Object { $_.Name })
+    if ($remaining.Count -gt 0) {
+        return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 70; Message = 'Barre à gauche. Toujours épinglé : ' + ($remaining -join ', ') + ' (clic droit > Désépingler), puis reprendre.' }
+    }
+    [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Barre des tâches à gauche, sans Edge ni Microsoft Store. Reverse rétablit l''alignement.' }
 }
 
 function ConvertFrom-GenesisNtpPacket {
@@ -3345,6 +3606,8 @@ function Invoke-GenesisCustomization {
         'pdf-reader' { return Install-GenesisPdfReader -RunDirectory $RunDirectory -Choice (Get-GenesisChoiceValue -Choices $Choices -Name 'pdf-reader') }
         'netbird' { return Install-GenesisNetBird -RunDirectory $RunDirectory }
         'taskbar-pins' { return Set-GenesisTaskbarLayout -RunDirectory $RunDirectory }
+        'start-cleanup' { return Invoke-GenesisStartCleanup -RunDirectory $RunDirectory }
+        'taskbar-left' { return Set-GenesisTaskbarLeft -RunDirectory $RunDirectory }
         default {
             $changes = @(Get-GenesisRegistryChange -StepId $StepId)
             Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $StepId -Percent 30 -Message 'Lecture et sauvegarde des réglages existants'
@@ -3477,7 +3740,7 @@ function Get-GenesisConsoleTableBorder {
 
 function ConvertTo-GenesisConsoleTableRow {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$Cells, [Parameter(Mandatory)][int]$DetailWidth)
+    param([Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Cells, [Parameter(Mandatory)][int]$DetailWidth)
     $widths = @($script:GenesisConsoleTableColumns) + $DetailWidth
     $parts = for ($index = 0; $index -lt $widths.Count; $index++) {
         $value = if ($index -lt $Cells.Count) { [string]$Cells[$index] } else { '' }

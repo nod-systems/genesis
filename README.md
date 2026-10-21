@@ -50,20 +50,22 @@ consulter un plan sans appliquer de réglage :
 
 | Opération | Comportement |
 | --- | --- |
-| Windows Update | Rechercher et installer les mises à jour, les mises à jour facultatives et les pilotes proposés ; aucun redémarrage forcé |
-| Mise à niveau Windows | Installer la nouvelle version proposée par Windows Update (ex. 26H2) ; décochée par défaut, à choisir explicitement |
 | Explorateur | Ouvrir sur Ce PC |
 | Suggestions Windows | Masquer les conseils et propositions de finalisation |
 | Notification | Afficher les icônes déjà enregistrées dans la session |
 | Barre des tâches | Masquer Recherche, Widgets et Vue des tâches |
+| Barre à gauche | Aligner la barre des tâches à gauche et retirer les épingles Edge et Microsoft Store ; Reverse rétablit l'alignement |
+| Menu Démarrer | Désinstaller Outlook (new), Xbox, Solitaire, WhatsApp et LinkedIn et les retirer des nouveaux comptes ; non réversible |
 | Heure | Synchroniser Windows Time en respectant le serveur horaire et les paramètres de domaine existants |
 | Office LTSC 2024 | Récupérer ODT depuis Microsoft, vérifier ses signatures et installer Standard 2024 en français depuis le CDN Microsoft ; aucune clé ni activation intégrée |
 | Navigateur | Installer Chrome ou Firefox depuis leurs sources officielles et préparer l'association par défaut |
 | PDF | Installer Acrobat Reader, SumatraPDF ou PDFCraft et préparer l'association par défaut |
 | Outlook classique | Proposer le réglage AutoDiscover qui exclut le point de terminaison Microsoft 365 |
-| Veille secteur | Désactiver la veille lorsque le poste est branché |
+| Veille secteur | Régler la mise en veille sur secteur sur « Jamais » ; Reverse restaure le délai initial |
 | Compte local | Demander un nom et un mot de passe dans la console et créer un compte standard ; le mot de passe n'est pas journalisé |
 | NetBird | Installer le client officiel et demander son serveur au lancement ; aucun serveur ni secret préconfiguré, aucune connexion automatique |
+| Windows Update | Rechercher et installer les mises à jour, les mises à jour facultatives et les pilotes proposés ; exécuté en dernier, redémarre et reprend seul si Windows le demande |
+| Mise à niveau Windows | Installer la nouvelle version proposée par Windows Update (ex. 26H2) après les correctifs ; décochée par défaut, à choisir explicitement |
 | Épingles | Préparer Explorateur, Word, Excel, PowerPoint et Outlook classique lorsqu'Office est présent |
 | Debloat | Afficher les programmes installés, laisser le technicien sélectionner les désinstallations et vérifier leur résultat |
 | Imprimantes réseau | Découvrir les imprimantes WSD, proposer leur ajout et ouvrir une recherche de pilote à la demande |
@@ -101,14 +103,22 @@ une préparation, utiliser cet identifiant :
 .\Genesis-Portable.ps1 -Action ConfirmTaskbar -RunId IDENTIFIANT
 ```
 
+Windows Update et la mise à niveau s'exécutent après toutes les autres opérations.
 Quand Windows Update demande un redémarrage à la fin d'une préparation lancée
-depuis le menu, Genesis propose de redémarrer et de poursuivre automatiquement.
+depuis le menu, Genesis redémarre le poste après 60 secondes, sans question
+(`shutdown /a` annule ce redémarrage ; la reprise aura lieu au prochain démarrage).
 Une tâche planifiée `Genesis - reprise Windows Update`, exécutée par SYSTEM au
 démarrage, relance alors uniquement Windows Update et, si elle est sélectionnée, la mise à niveau de version, depuis une copie du programme
 dans `C:\ProgramData\Genesis\bin`, sans ouverture de session. Elle redémarre
 le poste tant que des mises à jour restent proposées, au plus 8 fois, puis se
 supprime et prévient les sessions ouvertes. Elle s'arrête aussi en cas d'échec
 ou si la préparation a été restaurée entre-temps.
+
+Le menu **Désinstaller Genesis** supprime toutes les traces de Genesis : `C:\ProgramData\Genesis`
+(préparations, sauvegardes, installeurs, journaux), la tâche de reprise Windows Update,
+les dossiers `%LOCALAPPDATA%\Genesis` des profils, la stratégie de barre des tâches qui
+pointe vers Genesis et le programme lancé (sauf depuis une clé USB). Les personnalisations,
+logiciels et comptes créés restent en place ; Reverse n'est plus possible ensuite.
 
 Le menu Reverse affiche les préparations restaurables. Les sauvegardes sont
 liées à la machine, au compte et à la version de Genesis qui les a créées.

@@ -77,7 +77,7 @@ function Get-GenesisConsoleTableBorder {
 
 function ConvertTo-GenesisConsoleTableRow {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$Cells, [Parameter(Mandatory)][int]$DetailWidth)
+    param([Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Cells, [Parameter(Mandatory)][int]$DetailWidth)
     $widths = @($script:GenesisConsoleTableColumns) + $DetailWidth
     $parts = for ($index = 0; $index -lt $widths.Count; $index++) {
         $value = if ($index -lt $Cells.Count) { [string]$Cells[$index] } else { '' }

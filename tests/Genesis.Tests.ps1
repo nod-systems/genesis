@@ -57,7 +57,7 @@ Describe 'Contrat des profils Genesis' {
 
     It 'expose les choix logiciels dans le profil Windows' {
         $windowsProfile = Get-Content (Join-Path $script:Repository 'profiles/windows.json') -Raw | ConvertFrom-Json
-        $windowsProfile.steps[0] | Should -Be 'windows-update'
+        $windowsProfile.steps | Should -Contain 'windows-update'
         $windowsProfile.steps | Should -Contain 'office-2024'
         $windowsProfile.steps | Should -Contain 'browser'
         $windowsProfile.steps | Should -Contain 'pdf-reader'
@@ -149,7 +149,8 @@ Describe 'Mise a niveau de version Windows' {
             Test-GenesisStepSelectedByDefault -StepId 'windows-update' | Should -BeTrue
         }
         $windowsProfile = Get-Content (Join-Path $script:Repository 'profiles/windows.json') -Raw | ConvertFrom-Json
-        $windowsProfile.steps[1] | Should -Be 'windows-feature-update'
+        $windowsProfile.steps[-2] | Should -Be 'windows-update'
+        $windowsProfile.steps[-1] | Should -Be 'windows-feature-update'
     }
 
     It 'affiche la version proposee dans la checklist' {
@@ -246,11 +247,42 @@ Describe 'Etat courant affiche dans la checklist' {
 }
 
 Describe 'Menu technicien principal' {
-    It 'ne conserve que les quatre actions de preparation et la sortie' {
+    It 'ne conserve que les actions de preparation, la desinstallation et la sortie' {
         InModuleScope Genesis {
             $entries = @(Get-GenesisMainMenuEntry)
-            @($entries.Id) | Should -Be @('1', '2', '3', '4', '0')
+            @($entries.Id) | Should -Be @('1', '2', '3', '4', '5', '0')
             ($entries.Label -join ' | ') | Should -Not -Match 'Inventaire|Plan du profil|Catalogue|Reprendre|Afficher le tableau'
+        }
+    }
+
+    It 'desinstalle Genesis en supprimant ses traces sans toucher aux personnalisations' {
+        InModuleScope Genesis {
+            $root = Join-Path $TestDrive 'GenesisData'
+            New-Item -ItemType Directory -Path (Join-Path $root 'runs') -Force | Out-Null
+            Mock Assert-GenesisAdministrator {}
+            Mock Open-GenesisRunLock { [pscustomobject]@{} | Add-Member -MemberType ScriptMethod -Name Dispose -Value {} -PassThru }
+            Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Genesis - reprise Windows Update' } }
+            Mock Unregister-GenesisUpdateContinuation {}
+            Mock Get-CimInstance { @() }
+            Mock Get-GenesisRegistryValue { [pscustomobject]@{ Exists = $false; KeyExists = $false; Kind = ''; Data = $null } }
+            Mock Get-GenesisPortablePath { $null }
+            Mock Remove-ItemProperty {}
+            $result = Uninstall-GenesisFootprint -DataRoot $root -Confirm:$false
+            Test-Path -LiteralPath $root | Should -BeFalse
+            Should -Invoke Unregister-GenesisUpdateContinuation -Exactly -Times 1
+            Should -Invoke Remove-ItemProperty -Exactly -Times 0
+            $result.Failed.Count | Should -Be 0
+        }
+    }
+
+    It 'demande OUI avant de desinstaller Genesis' {
+        InModuleScope Genesis {
+            Mock Write-Host {}
+            Mock Get-GenesisFootprint { @([pscustomobject]@{ Kind = 'Folder'; Path = 'C:\ProgramData\Genesis'; Label = 'Données' }) }
+            Mock Read-Host { 'oui' }
+            Mock Uninstall-GenesisFootprint {}
+            Show-GenesisUninstall | Should -BeFalse
+            Should -Invoke Uninstall-GenesisFootprint -Exactly -Times 0
         }
     }
 
@@ -435,6 +467,8 @@ Describe 'Preparation et reprise' {
             $line | Should -Not -Match '█'
             $line | Should -Not -Match "`n"
             $line.Length | Should -Be (Get-GenesisConsoleTableBorder -DetailWidth 20).Length
+            $pending = [pscustomobject]@{ Id = 'power-ac'; State = 'À faire'; Status = 'Pending'; Percent = 0; Undo = 'Non'; Detail = '' }
+            { ConvertTo-GenesisConsoleProgressRow -Row $pending -DetailWidth 20 } | Should -Not -Throw
         }
     }
 
@@ -790,34 +824,77 @@ Describe 'Reprise de Windows Update apres redemarrage' {
         { Register-GenesisUpdateContinuation -RunId $run.RunId -DataRoot $script:DataRoot } | Should -Throw '*Genesis-Portable.ps1*'
     }
 
-    It 'propose le redemarrage seulement si Windows Update est en attente' {
-        InModuleScope Genesis {
-            Mock Read-Host { 'O' }
-            Mock Write-Host {}
-            Mock Get-GenesisPortablePath { 'C:\Genesis\Genesis-Portable.ps1' }
-            Mock Register-GenesisUpdateContinuation {}
-            Mock Restart-GenesisComputer {}
-            $done = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'Completed' }) }
-            Request-GenesisUpdateRestart -State $done
-            Should -Invoke Read-Host -Exactly -Times 0
-            $pending = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'NeedsAttention' }) }
-            Request-GenesisUpdateRestart -State $pending
-            Should -Invoke Register-GenesisUpdateContinuation -Exactly -Times 1 -ParameterFilter { $RunId -eq ('a' * 32) }
-            Should -Invoke Restart-GenesisComputer -Exactly -Times 1
-        }
-    }
-
-    It 'ne redemarre pas si le technicien refuse' {
+    It 'redemarre automatiquement, sans question, seulement si Windows Update est en attente' {
         InModuleScope Genesis {
             Mock Read-Host { 'N' }
             Mock Write-Host {}
             Mock Get-GenesisPortablePath { 'C:\Genesis\Genesis-Portable.ps1' }
             Mock Register-GenesisUpdateContinuation {}
             Mock Restart-GenesisComputer {}
+            $done = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'Completed' }) }
+            Request-GenesisUpdateRestart -State $done
+            Should -Invoke Restart-GenesisComputer -Exactly -Times 0
             $pending = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'NeedsAttention' }) }
             Request-GenesisUpdateRestart -State $pending
-            Should -Invoke Register-GenesisUpdateContinuation -Exactly -Times 0
+            Should -Invoke Read-Host -Exactly -Times 0
+            Should -Invoke Register-GenesisUpdateContinuation -Exactly -Times 1 -ParameterFilter { $RunId -eq ('a' * 32) }
+            Should -Invoke Restart-GenesisComputer -Exactly -Times 1
+        }
+    }
+
+    It 'ne redemarre pas si la reprise automatique ne peut pas etre programmee' {
+        InModuleScope Genesis {
+            Mock Write-Host {}
+            Mock Get-GenesisPortablePath { 'C:\Genesis\Genesis-Portable.ps1' }
+            Mock Register-GenesisUpdateContinuation { throw 'Tache refusee' }
+            Mock Restart-GenesisComputer {}
+            $pending = [pscustomobject]@{ RunId = ('a' * 32); Steps = @([pscustomobject]@{ Id = 'windows-update'; Status = 'NeedsAttention' }) }
+            Request-GenesisUpdateRestart -State $pending
             Should -Invoke Restart-GenesisComputer -Exactly -Times 0
+        }
+    }
+
+    It 'propose le nettoyage du menu Demarrer et la barre des taches a gauche' {
+        $windowsProfile = Get-Content (Join-Path $script:Repository 'profiles/windows.json') -Raw | ConvertFrom-Json
+        $windowsProfile.steps | Should -Contain 'start-cleanup'
+        $windowsProfile.steps | Should -Contain 'taskbar-left'
+        InModuleScope Genesis {
+            (Get-GenesisStepCatalog | Where-Object Id -eq 'start-cleanup').Reversible | Should -BeFalse
+            (Get-GenesisStepCatalog | Where-Object Id -eq 'taskbar-left').Reversible | Should -BeTrue
+            $names = @($script:GenesisStartCleanupPackages.Keys)
+            foreach ($expected in @('Microsoft.OutlookForWindows', 'Microsoft.GamingApp', 'Microsoft.MicrosoftSolitaireCollection', '5319275A.WhatsAppDesktop', '7EE7776C.LinkedInforWindows')) {
+                $names | Should -Contain $expected
+            }
+            $names | Should -Not -Contain 'Microsoft.XboxIdentityProvider'
+            { Assert-GenesisRegistryTarget -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarAl' } | Should -Not -Throw
+        }
+    }
+
+    It 'desinstalle les applications du menu Demarrer et les retire des nouveaux comptes' {
+        InModuleScope Genesis {
+            Mock Set-GenesisStepProgress {}
+            Mock Get-AppxPackage { @([pscustomobject]@{ Name = 'Microsoft.OutlookForWindows'; PackageFullName = 'outlook_1'; NonRemovable = $false }, [pscustomobject]@{ Name = 'Microsoft.WindowsCalculator'; PackageFullName = 'calc_1'; NonRemovable = $false }) }
+            Mock Remove-AppxPackage {}
+            Mock Get-AppxProvisionedPackage { @([pscustomobject]@{ DisplayName = 'Microsoft.GamingApp'; PackageName = 'gaming_1' }) }
+            Mock Remove-AppxProvisionedPackage {}
+            Mock Remove-GenesisStartPin { '2 épingle(s) retirée(s) du menu Démarrer.' }
+            $result = Invoke-GenesisStartCleanup -RunDirectory $TestDrive
+            Should -Invoke Remove-AppxPackage -Exactly -Times 1 -ParameterFilter { $Package -eq 'outlook_1' }
+            Should -Invoke Remove-AppxProvisionedPackage -Exactly -Times 1 -ParameterFilter { $PackageName -eq 'gaming_1' }
+            $result.Message | Should -Match 'Outlook \(new\)'
+            Should -Invoke Remove-GenesisStartPin -Exactly -Times 1
+        }
+    }
+
+    It 'place Windows Update et la mise a niveau en dernier' {
+        InModuleScope Genesis {
+            $ordered = @(Get-GenesisStepOrder -Steps @('windows-feature-update', 'windows-update', 'explorer-home', 'power-ac'))
+            ($ordered -join ',') | Should -Be 'explorer-home,power-ac,windows-update,windows-feature-update'
+            $catalog = @(Get-GenesisStepCatalog | ForEach-Object { $_.Id })
+            $catalog[-2] | Should -Be 'windows-update'
+            $catalog[-1] | Should -Be 'windows-feature-update'
+            $objects = @(Get-GenesisStepOrder -Steps @([pscustomobject]@{ Id = 'windows-update' }, [pscustomobject]@{ Id = 'time-sync' }))
+            $objects[0].Id | Should -Be 'time-sync'
         }
     }
 

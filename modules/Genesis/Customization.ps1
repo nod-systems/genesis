@@ -6,7 +6,7 @@
 function Assert-GenesisRegistryTarget {
     param([string]$Path, [string]$Name)
     $allowed = @{
-        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' = @('LaunchTo', 'TaskbarDa', 'ShowTaskViewButton')
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' = @('LaunchTo', 'TaskbarDa', 'ShowTaskViewButton', 'TaskbarAl')
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' = @('SearchboxTaskbarMode')
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' = @('SubscribedContent-338389Enabled')
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' = @('ScoobeSystemSettingEnabled')
@@ -259,6 +259,141 @@ function Set-GenesisTaskbarLayout {
         Invoke-GenesisRegistryTransaction -Changes $changes -SnapshotPath (Join-Path $RunDirectory 'taskbar-pins.registry.json')
     }
     [pscustomobject]@{ Status = 'AwaitingSession'; Percent = 80; Message = 'Disposition préparée. Vérifier les 5 épingles dans la session ; retirer les anciennes épingles utilisateur puis valider.' }
+}
+
+# Applications retirées par le nettoyage du menu Démarrer (noms de paquets Appx).
+$script:GenesisStartCleanupPackages = [ordered]@{
+    'Microsoft.OutlookForWindows' = 'Outlook (new)'
+    'Microsoft.GamingApp' = 'Xbox'
+    'Microsoft.XboxApp' = 'Xbox'
+    'Microsoft.XboxGamingOverlay' = 'Xbox Game Bar'
+    'Microsoft.XboxGameOverlay' = 'Xbox Game Bar'
+    'Microsoft.XboxSpeechToTextOverlay' = 'Xbox Game Bar'
+    'Microsoft.Xbox.TCUI' = 'Xbox'
+    'Microsoft.MicrosoftSolitaireCollection' = 'Solitaire'
+    '5319275A.WhatsAppDesktop' = 'WhatsApp'
+    '7EE7776C.LinkedInforWindows' = 'LinkedIn'
+}
+
+function Get-GenesisStartCleanupInstalled {
+    $names = @($script:GenesisStartCleanupPackages.Keys)
+    @(Get-AppxPackage -ErrorAction Stop | Where-Object { $_.Name -in $names -and -not $_.NonRemovable })
+}
+
+function Get-GenesisStartCleanupPin {
+    # Épingles du menu Démarrer visées par le nettoyage (y compris les raccourcis « à installer »).
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('genesis-start-' + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        Export-StartLayout -Path $path -ErrorAction Stop
+        $pattern = '^(' + ((@($script:GenesisStartCleanupPackages.Keys) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')_'
+        @((Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).pinnedList | Where-Object { $_.PSObject.Properties.Name -contains 'packagedAppId' -and [string]$_.packagedAppId -match $pattern } | ForEach-Object {
+            $script:GenesisStartCleanupPackages[([string]$_.packagedAppId -split '_')[0]]
+        } | Select-Object -Unique)
+    }
+    catch { @() }
+    finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-GenesisStartPin {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    # Les raccourcis « à installer » (WhatsApp, LinkedIn…) n'ont pas de commande Désépingler :
+    # on réapplique une seule fois la liste actuelle sans eux (ConfigureStartPins + applyOnce), puis on retire la stratégie.
+    $key = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
+    $existing = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and ($existing.PSObject.Properties.Name -contains 'ConfigureStartPins' -or $existing.PSObject.Properties.Name -contains 'ConfigureStartPinsJSON')) {
+        return 'Épingles gérées par une stratégie existante : non modifiées.'
+    }
+    $folder = Join-Path $env:LOCALAPPDATA ('Genesis\StartPins\' + (Split-Path -Leaf $RunDirectory))
+    New-Item -Path $folder -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $before = Join-Path $folder 'avant.json'
+    Export-StartLayout -Path $before -ErrorAction Stop
+    $layout = Get-Content -LiteralPath $before -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pattern = '^(' + ((@($script:GenesisStartCleanupPackages.Keys) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')_'
+    $all = @($layout.pinnedList)
+    $kept = @($all | Where-Object { -not ($_.PSObject.Properties.Name -contains 'packagedAppId' -and [string]$_.packagedAppId -match $pattern) })
+    if ($kept.Count -eq $all.Count) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue; return 'Aucune épingle à retirer du menu Démarrer.' }
+    $pinsPath = Join-Path $folder 'epingles.json'
+    $json = [pscustomobject]@{ applyOnce = $true; pinnedList = $kept } | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::WriteAllText($pinsPath, $json, (New-Object Text.UTF8Encoding($false)))
+    try {
+        New-Item -Path $key -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $key -Name 'ConfigureStartPins' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $key -Name 'ConfigureStartPinsJSON' -PropertyType ExpandString -Value $pinsPath -Force -ErrorAction Stop | Out-Null
+        Get-Process -Name StartMenuExperienceHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+    }
+    finally {
+        Remove-ItemProperty -LiteralPath $key -Name 'ConfigureStartPins', 'ConfigureStartPinsJSON' -ErrorAction SilentlyContinue
+        Get-Process -Name StartMenuExperienceHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 3
+    $after = Join-Path $folder 'apres.json'
+    Export-StartLayout -Path $after -ErrorAction Stop
+    $left = @((Get-Content -LiteralPath $after -Raw -Encoding UTF8 | ConvertFrom-Json).pinnedList | Where-Object { $_.PSObject.Properties.Name -contains 'packagedAppId' -and [string]$_.packagedAppId -match $pattern })
+    Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    if ($left.Count -gt 0) { throw 'Les épingles du menu Démarrer n''ont pas pu être retirées.' }
+    return ('{0} épingle(s) retirée(s) du menu Démarrer.' -f ($all.Count - $kept.Count))
+}
+
+function Invoke-GenesisStartCleanup {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    $names = @($script:GenesisStartCleanupPackages.Keys)
+    $installed = @(Get-GenesisStartCleanupInstalled)
+    $removed = @(); $failed = @()
+    $index = 0
+    foreach ($package in $installed) {
+        $index++
+        $label = $script:GenesisStartCleanupPackages[$package.Name]
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'start-cleanup' -Percent ([int](10 + 60 * $index / [math]::Max(1, $installed.Count))) -Message ('Désinstallation : ' + $label)
+        try { Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop; $removed += $label }
+        catch { $failed += $label; Write-Verbose ('Désinstallation impossible : ' + $package.Name + ' : ' + $_.Exception.Message) }
+    }
+    # Retrait des applications préinstallées : les comptes créés ensuite ne les reçoivent plus.
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'start-cleanup' -Percent 80 -Message 'Retrait des applications préinstallées pour les nouveaux comptes'
+    foreach ($provisioned in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { $_.DisplayName -in $names })) {
+        try { Remove-AppxProvisionedPackage -Online -PackageName $provisioned.PackageName -ErrorAction Stop | Out-Null }
+        catch { $failed += $script:GenesisStartCleanupPackages[$provisioned.DisplayName]; Write-Verbose ('Retrait préinstallé impossible : ' + $provisioned.DisplayName) }
+    }
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'start-cleanup' -Percent 90 -Message 'Retrait des épingles WhatsApp, LinkedIn et des applications désinstallées'
+    $pinText = try { ' ' + (Remove-GenesisStartPin -RunDirectory $RunDirectory) } catch { $failed += 'épingles'; ' Épingles du menu Démarrer à retirer à la main : ' + $_.Exception.Message }
+    $remaining = @(Get-GenesisStartCleanupInstalled | ForEach-Object { $script:GenesisStartCleanupPackages[$_.Name] } | Select-Object -Unique)
+    $removedText = if ($removed.Count -gt 0) { 'Désinstallé : ' + ((@($removed) | Select-Object -Unique) -join ', ') + '.' } else { 'Aucune de ces applications n''était installée.' }
+    if ($remaining.Count -gt 0) {
+        return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 90; Message = $removedText + ' Toujours présent : ' + ($remaining -join ', ') + '.' + $pinText }
+    }
+    if ($failed -contains 'épingles') { return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 90; Message = $removedText + $pinText } }
+    [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = $removedText + $pinText + ' Non réversible : réinstaller depuis le Microsoft Store si besoin.' }
+}
+
+function Get-GenesisTaskbarPinnedApp {
+    param([Parameter(Mandatory)][string[]]$Names)
+    # Le verbe « Désépingler de la barre des tâches » n'est proposé que pour les applications épinglées.
+    $shell = New-Object -ComObject Shell.Application
+    $folder = $shell.NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}')
+    if ($null -eq $folder) { return @() }
+    foreach ($item in @($folder.Items())) {
+        if ([string]$item.Name -notin $Names) { continue }
+        $verb = @($item.Verbs()) | Where-Object { ([string]$_.Name -replace '&', '') -match '^(Désépingler de la barre des tâches|Unpin from taskbar)$' } | Select-Object -First 1
+        if ($null -ne $verb) { [pscustomobject]@{ Name = [string]$item.Name; Verb = $verb } }
+    }
+}
+
+function Set-GenesisTaskbarLeft {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'taskbar-left' -Percent 20 -Message 'Sauvegarde et alignement de la barre des tâches à gauche'
+    $change = [pscustomobject]@{ Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Name = 'TaskbarAl'; Kind = 'DWord'; Data = 0 }
+    Invoke-GenesisRegistryTransaction -Changes @($change) -SnapshotPath (Join-Path $RunDirectory 'taskbar-left.registry.json')
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'taskbar-left' -Percent 50 -Message 'Retrait des épingles Edge et Microsoft Store'
+    $names = @('Microsoft Edge', 'Microsoft Store')
+    foreach ($pin in @(Get-GenesisTaskbarPinnedApp -Names $names)) {
+        try { $pin.Verb.DoIt() } catch { Write-Verbose ('Désépinglage impossible : ' + $pin.Name) }
+    }
+    Start-Sleep -Milliseconds 800
+    $remaining = @(Get-GenesisTaskbarPinnedApp -Names $names | ForEach-Object { $_.Name })
+    if ($remaining.Count -gt 0) {
+        return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 70; Message = 'Barre à gauche. Toujours épinglé : ' + ($remaining -join ', ') + ' (clic droit > Désépingler), puis reprendre.' }
+    }
+    [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Barre des tâches à gauche, sans Edge ni Microsoft Store. Reverse rétablit l''alignement.' }
 }
 
 function ConvertFrom-GenesisNtpPacket {
@@ -1683,6 +1818,8 @@ function Invoke-GenesisCustomization {
         'pdf-reader' { return Install-GenesisPdfReader -RunDirectory $RunDirectory -Choice (Get-GenesisChoiceValue -Choices $Choices -Name 'pdf-reader') }
         'netbird' { return Install-GenesisNetBird -RunDirectory $RunDirectory }
         'taskbar-pins' { return Set-GenesisTaskbarLayout -RunDirectory $RunDirectory }
+        'start-cleanup' { return Invoke-GenesisStartCleanup -RunDirectory $RunDirectory }
+        'taskbar-left' { return Set-GenesisTaskbarLeft -RunDirectory $RunDirectory }
         default {
             $changes = @(Get-GenesisRegistryChange -StepId $StepId)
             Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $StepId -Percent 30 -Message 'Lecture et sauvegarde des réglages existants'
