@@ -7,13 +7,11 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('Menu', 'Gui', 'Inventory', 'Plan', 'Run', 'Resume', 'Status', 'Catalog', 'Undo', 'ConfirmTaskbar', 'ContinueUpdates', 'UpdateWorker')]
+    [ValidateSet('Menu', 'Gui', 'Inventory', 'Plan', 'Run', 'Resume', 'Status', 'Catalog', 'Undo', 'ConfirmTaskbar', 'ContinueUpdates')]
     [string]$Action = 'Menu',
     [string]$ProfilePath = (Join-Path $PSScriptRoot 'profiles/windows.json'),
     [string]$DataRoot,
-    [string]$RunId,
-    [ValidateSet('Quality', 'Feature')]
-    [string]$UpdateScope = 'Quality'
+    [string]$RunId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,5 +34,4 @@ switch ($Action) {
     'Undo' { Undo-GenesisRun -RunId $RunId -DataRoot $DataRoot -WhatIf:$WhatIfPreference | ConvertTo-Json -Depth 16 }
     'ConfirmTaskbar' { Confirm-GenesisTaskbar -RunId $RunId -DataRoot $DataRoot -WhatIf:$WhatIfPreference | ConvertTo-Json -Depth 16 }
     'ContinueUpdates' { Invoke-GenesisUpdateContinuation -RunId $RunId -DataRoot $DataRoot | ConvertTo-Json -Depth 8 }
-    'UpdateWorker' { Invoke-GenesisUpdateWorker -RunId $RunId -DataRoot $DataRoot -Scope $UpdateScope | ConvertTo-Json -Depth 8 }
 }

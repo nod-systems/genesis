@@ -92,16 +92,14 @@ def build_portable_script(source: Path) -> bytes:
 param(
     [ValidateSet(
         'Menu', 'Gui', 'Inventory', 'Plan', 'Run', 'Resume', 'Status', 'Catalog', 'Undo',
-        'ConfirmTaskbar', 'ContinueUpdates', 'UpdateWorker'
+        'ConfirmTaskbar', 'ContinueUpdates'
     )]
     [string]$Action = 'Menu',
     [ValidateSet('base', 'windows')]
     [string]$ProfileId = 'windows',
     [string]$ProfilePath,
     [string]$DataRoot,
-    [string]$RunId,
-    [ValidateSet('Quality', 'Feature')]
-    [string]$UpdateScope = 'Quality'
+    [string]$RunId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -144,10 +142,6 @@ switch ($Action) {
     'ConfirmTaskbar' { Confirm-GenesisTaskbar @runControlArguments | ConvertTo-Json -Depth 16 }
     'ContinueUpdates' {
         Invoke-GenesisUpdateContinuation -RunId $RunId -DataRoot $DataRoot | ConvertTo-Json -Depth 8
-    }
-    'UpdateWorker' {
-        $worker = Invoke-GenesisUpdateWorker -RunId $RunId -DataRoot $DataRoot -Scope $UpdateScope
-        $worker | ConvertTo-Json -Depth 8
     }
 }
 """

@@ -110,13 +110,6 @@ le poste tant que des mises à jour restent proposées, au plus 8 fois, puis se
 supprime et prévient les sessions ouvertes. Elle s'arrête aussi en cas d'échec
 ou si la préparation a été restaurée entre-temps.
 
-Lancé depuis une session distante (SSH, WinRM, outil de prise en main en
-session réseau), Windows refuse le téléchargement des mises à jour au compte
-connecté. Genesis-Portable.ps1 confie alors Windows Update et la mise à niveau
-de version à une tâche ponctuelle `Genesis - Windows Update`, exécutée par
-SYSTEM depuis la même copie protégée, attend sa fin en affichant la
-progression, puis la supprime.
-
 Le menu Reverse affiche les préparations restaurables. Les sauvegardes sont
 liées à la machine, au compte et à la version de Genesis qui les a créées.
 La restauration conserve les modifications faites entre-temps par l'utilisateur

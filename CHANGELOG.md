@@ -16,10 +16,6 @@ Première version stable de Genesis.
   `Genesis - reprise Windows Update` poursuit les mises à jour au démarrage,
   sans ouverture de session. Au plus 8 redémarrages ; la tâche se supprime à
   la fin, en cas d'échec ou si la préparation a été restaurée.
-- Lancé depuis une session distante (SSH, WinRM, prise en main en session
-  réseau), Genesis confie Windows Update à une tâche SYSTEM ponctuelle
-  `Genesis - Windows Update`, car Windows refuse alors le téléchargement au
-  compte connecté.
 
 ### Sécurité
 
@@ -49,6 +45,4 @@ d'elle-même au démarrage suivant.
 
 Validé sur Windows 11 Pro 25H2 et 26H2 : syntaxe Windows PowerShell 5.1,
 PSScriptAnalyzer, tests Pester, reprise réelle après redémarrage et passage
-réel de 25H2 à 26H2 par la tâche SYSTEM. L'installation d'une mise à jour
-lancée par SSH n'a pas été démontrée en réel, faute de mise à jour proposée
-pendant les essais ; la recherche par la tâche SYSTEM l'a été.
+réel de 25H2 à 26H2 par la tâche SYSTEM.

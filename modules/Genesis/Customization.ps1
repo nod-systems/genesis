@@ -1671,8 +1671,8 @@ function Invoke-GenesisCustomization {
     param([string]$StepId, [string]$RunDirectory, [object]$Choices)
     if ($env:OS -ne 'Windows_NT') { throw 'Personnalisation disponible sur Windows uniquement.' }
     switch ($StepId) {
-        'windows-update' { return Invoke-GenesisWindowsUpdateStep -RunDirectory $RunDirectory }
-        'windows-feature-update' { return Invoke-GenesisWindowsUpdateStep -RunDirectory $RunDirectory -Scope Feature }
+        'windows-update' { return Invoke-GenesisWindowsUpdate -RunDirectory $RunDirectory }
+        'windows-feature-update' { return Invoke-GenesisWindowsUpdate -RunDirectory $RunDirectory -Scope Feature }
         'time-sync' { return Set-GenesisWindowsTime -RunDirectory $RunDirectory }
         'power-ac' { return Set-GenesisPowerAc -RunDirectory $RunDirectory }
         'local-user' { return New-GenesisLocalUser -RunDirectory $RunDirectory }

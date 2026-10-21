@@ -754,26 +754,6 @@ function Restart-GenesisComputer {
     if ($result.ExitCode -ne 0) { throw "Redémarrage refusé par Windows (code $($result.ExitCode))." }
 }
 
-function Copy-GenesisPortableProgram {
-    param([Parameter(Mandatory)][string]$DataRoot)
-    $source = Get-GenesisPortablePath
-    if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -LiteralPath $source -PathType Leaf)) {
-        throw 'Les tâches SYSTEM de Windows Update nécessitent Genesis-Portable.ps1.'
-    }
-    # Le lanceur supprime sa copie temporaire et SYSTEM ne doit exécuter qu'une copie
-    # du répertoire protégé.
-    $binDirectory = Join-Path $DataRoot 'bin'
-    New-Item -Path $binDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-    $target = Join-Path $binDirectory 'Genesis-Portable.ps1'
-    if ([System.IO.Path]::GetFullPath($source) -ne [System.IO.Path]::GetFullPath($target)) {
-        Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
-    }
-    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) {
-        throw 'Copie de Genesis incohérente ; tâche SYSTEM non programmée.'
-    }
-    return $target
-}
-
 function Unregister-GenesisUpdateContinuation {
     if ($null -ne (Get-ScheduledTask -TaskName $script:GenesisUpdateTaskName -ErrorAction SilentlyContinue)) {
         Unregister-ScheduledTask -TaskName $script:GenesisUpdateTaskName -Confirm:$false -ErrorAction Stop
@@ -799,7 +779,14 @@ function Register-GenesisUpdateContinuation {
         if ($state.MachineId -cne (Get-GenesisMachineId)) { throw 'Cette préparation appartient à un autre ordinateur.' }
         if (-not (Test-GenesisUpdateContinuationNeeded -State $state)) { throw 'Aucune mise à jour Windows en attente dans cette préparation.' }
         $directory = Join-Path (Join-Path $root 'runs') $RunId
-        $target = Copy-GenesisPortableProgram -DataRoot $root
+        # Le lanceur supprime sa copie temporaire : la tâche démarre une copie du répertoire protégé.
+        $binDirectory = Join-Path $root 'bin'
+        New-Item -Path $binDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $target = Join-Path $binDirectory 'Genesis-Portable.ps1'
+        Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) {
+            throw 'Copie de Genesis incohérente ; reprise automatique non programmée.'
+        }
         $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action ContinueUpdates -RunId {1} -DataRoot "{2}"' -f $target, $RunId, $root
         $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -936,119 +923,6 @@ function Invoke-GenesisUpdateContinuation {
     elseif ($null -ne $notice) { Send-GenesisSessionMessage -Message $notice }
     $message = if ($null -ne $lastStep) { [string]$lastStep.Message } else { '' }
     return [pscustomobject]@{ RunId = $RunId; Outcome = [string]$continuation.Outcome; Message = $message; Reboots = [int]$continuation.Reboots }
-}
-
-$script:GenesisUpdateWorkerTaskName = 'Genesis - Windows Update'
-
-function Test-GenesisNetworkSession {
-    [CmdletBinding()]
-    param()
-    # Depuis une session réseau (SSH, WinRM, PsExec), l'API Windows Update refuse le
-    # téléchargement avec E_ACCESSDENIED : l'installation passe alors par SYSTEM.
-    if ($env:OS -ne 'Windows_NT') { return $false }
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    if ($identity.User.Value -eq 'S-1-5-18') { return $false }
-    return (@($identity.Groups | Where-Object { $_.Value -eq 'S-1-5-2' }).Count -gt 0)
-}
-
-function Invoke-GenesisWindowsUpdateStep {
-    param([Parameter(Mandatory)][string]$RunDirectory, [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality')
-    if (Test-GenesisNetworkSession) { return Invoke-GenesisWindowsUpdateAsSystem -RunDirectory $RunDirectory -Scope $Scope }
-    return Invoke-GenesisWindowsUpdate -RunDirectory $RunDirectory -Scope $Scope
-}
-
-function Unregister-GenesisUpdateWorker {
-    if ($null -ne (Get-ScheduledTask -TaskName $script:GenesisUpdateWorkerTaskName -ErrorAction SilentlyContinue)) {
-        Unregister-ScheduledTask -TaskName $script:GenesisUpdateWorkerTaskName -Confirm:$false -ErrorAction Stop
-    }
-}
-
-function Test-GenesisUpdateWorkerRunning {
-    $task = Get-ScheduledTask -TaskName $script:GenesisUpdateWorkerTaskName -ErrorAction SilentlyContinue
-    return ($null -ne $task -and [string]$task.State -in @('Running', 'Queued'))
-}
-
-function Invoke-GenesisWindowsUpdateAsSystem {
-    param(
-        [Parameter(Mandatory)][string]$RunDirectory,
-        [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality',
-        [ValidateRange(0, 60)][int]$PollSeconds = 2,
-        [ValidateRange(1, 1440)][int]$TimeoutMinutes = 480,
-        [ValidateRange(0, 600)][int]$StartGraceSeconds = 30
-    )
-    # Appelé pendant l'exécution, verrou tenu : la tâche ne reprend pas le verrou.
-    $directory = [System.IO.Path]::GetFullPath($RunDirectory)
-    $runId = Split-Path -Leaf $directory
-    if ($runId -notmatch '^[a-f0-9]{32}$') { throw 'Identifiant de préparation invalide.' }
-    $root = Split-Path -Parent (Split-Path -Parent $directory)
-    $stepId = if ($Scope -eq 'Feature') { 'windows-feature-update' } else { 'windows-update' }
-    $target = Copy-GenesisPortableProgram -DataRoot $root
-    $resultPath = Join-Path $directory ($stepId + '.system.json')
-    if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Force -ErrorAction Stop }
-    $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action UpdateWorker -RunId {1} -DataRoot "{2}" -UpdateScope {3}' -f $target, $runId, $root, $Scope
-    $task = @{
-        TaskName = $script:GenesisUpdateWorkerTaskName
-        Description = 'Windows Update de la préparation Genesis ' + $runId + ' lancée depuis une session distante'
-        Action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
-        Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeoutMinutes)
-    }
-    Set-GenesisStepProgress -RunDirectory $directory -StepId $stepId -Percent 5 -Message 'Session distante : Windows Update confié à une tâche SYSTEM'
-    Register-ScheduledTask @task -Force -ErrorAction Stop | Out-Null
-    Add-GenesisEvent -RunDirectory $directory -EventName 'update_worker_started' -StepId $stepId
-    try {
-        Start-ScheduledTask -TaskName $script:GenesisUpdateWorkerTaskName -ErrorAction Stop
-        $deadline = [datetime]::UtcNow.AddMinutes($TimeoutMinutes + 5)
-        $idleSince = $null
-        while (-not (Test-Path -LiteralPath $resultPath)) {
-            if ([datetime]::UtcNow -gt $deadline) { throw 'La tâche SYSTEM de Windows Update a dépassé le délai autorisé.' }
-            if (Test-GenesisUpdateWorkerRunning) { $idleSince = $null }
-            elseif ($null -eq $idleSince) { $idleSince = [datetime]::UtcNow }
-            # Démarrage différé ou fin juste avant l'écriture du résultat : on laisse un délai.
-            elseif (([datetime]::UtcNow - $idleSince).TotalSeconds -gt $StartGraceSeconds) {
-                throw 'La tâche SYSTEM de Windows Update s''est arrêtée sans résultat.'
-            }
-            try { Write-GenesisConsoleProgress -State (Get-Content -LiteralPath (Join-Path $directory 'state.json') -Raw -Encoding UTF8 | ConvertFrom-Json) }
-            catch { Write-Verbose 'Progression momentanément illisible.' }
-            Start-Sleep -Seconds $PollSeconds
-        }
-        $result = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    }
-    finally {
-        try { Unregister-GenesisUpdateWorker } catch { Write-Verbose 'Suppression de la tâche Windows Update impossible.' }
-    }
-    Add-GenesisEvent -RunDirectory $directory -EventName 'update_worker_finished' -StepId $stepId -ErrorType ([string]$result.ErrorType)
-    if ([string]$result.Status -eq 'Failed') { throw ('Windows Update (SYSTEM) : ' + [string]$result.Error) }
-    return [pscustomobject]@{ Status = [string]$result.Status; Percent = [int]$result.Percent; Message = [string]$result.Message }
-}
-
-function Invoke-GenesisUpdateWorker {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{32}$')][string]$RunId,
-        [string]$DataRoot,
-        [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality'
-    )
-    $root = Resolve-GenesisDataRoot -DataRoot $DataRoot
-    Assert-GenesisAdministrator
-    $directory = Join-Path (Join-Path $root 'runs') $RunId
-    $stepId = if ($Scope -eq 'Feature') { 'windows-feature-update' } else { 'windows-update' }
-    $resultPath = Join-Path $directory ($stepId + '.system.json')
-    try {
-        # La préparation qui a lancé cette tâche tient le verrou et attend ce résultat.
-        $state = Get-GenesisRun -RunId $RunId -DataRoot $root
-        if ($state.MachineId -cne (Get-GenesisMachineId)) { throw 'Cette préparation appartient à un autre ordinateur.' }
-        $step = @($state.Steps | Where-Object { $_.Id -eq $stepId -and $_.Status -eq 'Running' })
-        if ($step.Count -eq 0) { throw 'Aucune étape Windows Update en cours dans cette préparation.' }
-        $update = Invoke-GenesisWindowsUpdate -RunDirectory $directory -Scope $Scope
-        $result = [pscustomobject]@{ Status = [string]$update.Status; Percent = [int]$update.Percent; Message = [string]$update.Message; ErrorType = ''; Error = '' }
-    }
-    catch {
-        $result = [pscustomobject]@{ Status = 'Failed'; Percent = 0; Message = ''; ErrorType = $_.Exception.GetType().FullName; Error = $_.Exception.Message }
-    }
-    Write-GenesisJson -Path $resultPath -Value $result
-    return $result
 }
 
 function Request-GenesisUpdateRestart {
@@ -1748,4 +1622,4 @@ function Show-GenesisMenu {
 . (Join-Path $PSScriptRoot 'Customization.ps1')
 . (Join-Path $PSScriptRoot 'Progress.ps1')
 
-Export-ModuleMember -Function Register-GenesisUpdateContinuation, Invoke-GenesisUpdateContinuation, Invoke-GenesisUpdateWorker, Get-GenesisProfile, Get-GenesisStepCatalog, Get-GenesisPlan, Get-GenesisInventory, Format-GenesisInventoryAscii, Start-GenesisRun, Resume-GenesisRun, Get-GenesisRun, Show-GenesisMenu, Show-GenesisPrinterMenu, Get-GenesisNetworkPrinter, New-GenesisPrinterDriverSearchUrl, Open-GenesisPrinterDriverSearch, Add-GenesisPrinter, Get-GenesisProgress, Undo-GenesisRun, New-GenesisTaskbarXml, Confirm-GenesisTaskbar
+Export-ModuleMember -Function Register-GenesisUpdateContinuation, Invoke-GenesisUpdateContinuation, Get-GenesisProfile, Get-GenesisStepCatalog, Get-GenesisPlan, Get-GenesisInventory, Format-GenesisInventoryAscii, Start-GenesisRun, Resume-GenesisRun, Get-GenesisRun, Show-GenesisMenu, Show-GenesisPrinterMenu, Get-GenesisNetworkPrinter, New-GenesisPrinterDriverSearchUrl, Open-GenesisPrinterDriverSearch, Add-GenesisPrinter, Get-GenesisProgress, Undo-GenesisRun, New-GenesisTaskbarXml, Confirm-GenesisTaskbar

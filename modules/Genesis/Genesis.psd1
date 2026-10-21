@@ -11,7 +11,7 @@
         'Get-GenesisRun', 'Show-GenesisMenu', 'Show-GenesisPrinterMenu',
         'Get-GenesisNetworkPrinter', 'New-GenesisPrinterDriverSearchUrl', 'Open-GenesisPrinterDriverSearch', 'Add-GenesisPrinter', 'Get-GenesisProgress',
         'Undo-GenesisRun', 'New-GenesisTaskbarXml', 'Confirm-GenesisTaskbar',
-        'Register-GenesisUpdateContinuation', 'Invoke-GenesisUpdateContinuation', 'Invoke-GenesisUpdateWorker'
+        'Register-GenesisUpdateContinuation', 'Invoke-GenesisUpdateContinuation'
     )
     CmdletsToExport = @()
     VariablesToExport = @()
