@@ -974,6 +974,19 @@ Describe 'Capture FOG' {
         }
     }
 
+    It 'accepte une confirmation entourée d''espaces' {
+        InModuleScope Genesis {
+            $script:FogAnswers = @('fog.example.test', 'cle-api-fictive', 'cle-user-fictive', 'Win11-Ref', ' O ')
+            $script:FogAnswerIndex = 0
+            Mock Read-Host { $value = $script:FogAnswers[$script:FogAnswerIndex]; $script:FogAnswerIndex++; $value }
+            Mock Write-Host {}
+            Mock Find-GenesisFogImage { [pscustomobject]@{ id = 4; name = 'Win11-Ref' } }
+            $settings = Read-GenesisFogConfiguration
+            $settings.Server | Should -Be 'http://fog.example.test'
+            $settings.ImageName | Should -Be 'Win11-Ref'
+        }
+    }
+
     It 'réutilise un poste FOG connu par son adresse MAC et lui associe l''image' {
         InModuleScope Genesis {
             $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' }

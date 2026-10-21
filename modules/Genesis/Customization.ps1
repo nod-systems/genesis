@@ -2073,7 +2073,7 @@ function Read-GenesisFogConfiguration {
             $image = Find-GenesisFogImage -Settings $settings
             if ($null -eq $image) {
                 $create = Read-Host ('Image « {0} » absente de FOG : la créer maintenant (Windows, Single Disk - Resizable) [O/N]' -f $settings.ImageName)
-                if ($create -notmatch '^(?i)o(ui)?$') { Write-Host 'Créer l''image dans FOG (Image Management) ou saisir un autre nom.' -ForegroundColor Yellow; continue }
+                if ($create -notmatch '^\s*(?i)o(ui)?\s*$') { Write-Host 'Créer l''image dans FOG (Image Management) ou saisir un autre nom.' -ForegroundColor Yellow; continue }
                 $created = New-GenesisFogImage -Settings $settings
                 $image = $created.Image
                 Write-Host ('Image créée dans FOG : {0} | {1} | {2} | stockage {3}.' -f $created.Os, $created.Type, $created.Partition, $created.Group) -ForegroundColor Green
@@ -2082,7 +2082,7 @@ function Read-GenesisFogConfiguration {
         }
         catch { Write-Host $_.Exception.Message -ForegroundColor Red; continue }
         $answer = Read-Host 'Généraliser et capturer ce poste en fin de préparation [O/N]'
-        if ($answer -match '^(?i)o(ui)?$') { return $settings }
+        if ($answer -match '^\s*(?i)o(ui)?\s*$') { return $settings }
         return $null
     }
     Write-Host 'Paramètres FOG non validés après trois essais.' -ForegroundColor Red
