@@ -1939,7 +1939,7 @@ function Invoke-GenesisFogApi {
 }
 
 function Get-GenesisFogItem {
-    param([Parameter(Mandatory)]$Settings, [Parameter(Mandatory)][ValidateSet('host', 'image', 'macaddressassociation')][string]$Kind)
+    param([Parameter(Mandatory)]$Settings, [Parameter(Mandatory)][ValidateSet('host', 'image', 'macaddressassociation', 'os', 'imagetype', 'imagepartitiontype', 'storagegroup')][string]$Kind)
     $response = Invoke-GenesisFogApi -Settings $Settings -Path ('/fog/' + $Kind)
     $property = $Kind + 's'
     if ($null -eq $response -or @($response.PSObject.Properties.Name) -notcontains $property) {
@@ -1948,14 +1948,50 @@ function Get-GenesisFogItem {
     return @($response.$property | Where-Object { $null -ne $_ })
 }
 
-function Get-GenesisFogImage {
+function Find-GenesisFogImage {
     param([Parameter(Mandatory)]$Settings)
     $images = @(Get-GenesisFogItem -Settings $Settings -Kind 'image' | Where-Object { [string]$_.name -eq $Settings.ImageName })
-    if ($images.Count -eq 0) {
+    if ($images.Count -gt 1) { throw ('Plusieurs images FOG portent le nom « {0} ».' -f $Settings.ImageName) }
+    if ($images.Count -eq 0) { return $null }
+    return $images[0]
+}
+
+function Get-GenesisFogImage {
+    param([Parameter(Mandatory)]$Settings)
+    $image = Find-GenesisFogImage -Settings $Settings
+    if ($null -eq $image) {
         throw ('Image FOG « {0} » introuvable : la créer dans FOG (Image Management) avant la capture.' -f $Settings.ImageName)
     }
-    if ($images.Count -gt 1) { throw ('Plusieurs images FOG portent le nom « {0} ».' -f $Settings.ImageName) }
-    return $images[0]
+    return $image
+}
+
+function Select-GenesisFogReference {
+    param([AllowEmptyCollection()][object[]]$Items = @(), [Parameter(Mandatory)][string[]]$Patterns, [Parameter(Mandatory)][string]$Label)
+    foreach ($pattern in $Patterns) {
+        $match = @($Items | Where-Object { [string]$_.name -match $pattern } | Sort-Object { [int]$_.id })
+        if ($match.Count -gt 0) { return $match[0] }
+    }
+    throw "Réglage FOG introuvable pour créer l'image : $Label."
+}
+
+function New-GenesisFogImage {
+    param([Parameter(Mandatory)]$Settings)
+    # Réglages standard d'une image Windows dans FOG, lus sur le serveur plutôt que supposés.
+    $os = Select-GenesisFogReference -Items @(Get-GenesisFogItem -Settings $Settings -Kind 'os') -Patterns @('(?i)^windows 11', '(?i)^windows 10', '(?i)^windows') -Label 'système Windows'
+    $type = Select-GenesisFogReference -Items @(Get-GenesisFogItem -Settings $Settings -Kind 'imagetype') -Patterns @('(?i)single disk.*resizable') -Label 'type Single Disk - Resizable'
+    $partition = Select-GenesisFogReference -Items @(Get-GenesisFogItem -Settings $Settings -Kind 'imagepartitiontype') -Patterns @('(?i)^everything', '(?i)all') -Label 'partitions Everything'
+    $group = Select-GenesisFogReference -Items @(Get-GenesisFogItem -Settings $Settings -Kind 'storagegroup') -Patterns @('(?i)^default$', '.') -Label 'groupe de stockage'
+    $path = $Settings.ImageName -replace '[^A-Za-z0-9_-]', ''
+    if ([string]::IsNullOrWhiteSpace($path)) { throw 'Nom d''image FOG invalide : utiliser des lettres, chiffres, tirets ou soulignés.' }
+    $body = [ordered]@{
+        name = $Settings.ImageName; path = $path; description = 'Créée par Genesis'
+        osID = [int]$os.id; imageTypeID = [int]$type.id; imagePartitionTypeID = [int]$partition.id
+        isEnabled = 1; toReplicate = 1; storagegroups = @([int]$group.id)
+    }
+    Invoke-GenesisFogApi -Settings $Settings -Method POST -Path '/fog/image/create' -Body $body | Out-Null
+    $image = Find-GenesisFogImage -Settings $Settings
+    if ($null -eq $image) { throw 'FOG n''a pas confirmé la création de l''image.' }
+    return [pscustomobject]@{ Image = $image; Os = [string]$os.name; Type = [string]$type.name; Partition = [string]$partition.name; Group = [string]$group.name }
 }
 
 function Register-GenesisFogHost {
@@ -2013,7 +2049,7 @@ function Read-GenesisFogConfiguration {
     Write-Host 'Capture FOG : en fin de préparation, Windows sera généralisé (Sysprep) puis le poste' -ForegroundColor Yellow
     Write-Host 'redémarrera sur le réseau pour envoyer son image au serveur FOG. Il ne sera plus' -ForegroundColor Yellow
     Write-Host 'utilisable tel quel : au démarrage suivant, Windows repartira sur l''installation (OOBE).' -ForegroundColor Yellow
-    Write-Host 'Prérequis FOG : API activée, image déjà créée (Image Management), démarrage PXE fonctionnel.' -ForegroundColor DarkGray
+    Write-Host 'Prérequis FOG : API activée, démarrage PXE fonctionnel ; une image absente peut être créée.' -ForegroundColor DarkGray
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $server = Read-Host 'Serveur FOG (adresse IP ou URL ; laisser vide pour retirer la capture)'
         if ([string]::IsNullOrWhiteSpace($server)) { return $null }
@@ -2024,8 +2060,15 @@ function Read-GenesisFogConfiguration {
         $imageName = Read-Host 'Nom de l''image FOG qui recevra la capture'
         try {
             $settings = Assert-GenesisFogConfiguration -Settings ([pscustomobject]@{ Server = $server; ApiToken = $apiToken; UserToken = $userToken; ImageName = $imageName })
-            $image = Get-GenesisFogImage -Settings $settings
-            Write-Host ('Serveur FOG joint ; image « {0} » trouvée (n° {1}).' -f $image.name, $image.id) -ForegroundColor Green
+            $image = Find-GenesisFogImage -Settings $settings
+            if ($null -eq $image) {
+                $create = Read-Host ('Image « {0} » absente de FOG : la créer maintenant (Windows, Single Disk - Resizable) [O/N]' -f $settings.ImageName)
+                if ($create -notmatch '^(?i)o(ui)?$') { Write-Host 'Créer l''image dans FOG (Image Management) ou saisir un autre nom.' -ForegroundColor Yellow; continue }
+                $created = New-GenesisFogImage -Settings $settings
+                $image = $created.Image
+                Write-Host ('Image créée dans FOG : {0} | {1} | {2} | stockage {3}.' -f $created.Os, $created.Type, $created.Partition, $created.Group) -ForegroundColor Green
+            }
+            Write-Host ('Serveur FOG joint ; image « {0} » prête (n° {1}).' -f $image.name, $image.id) -ForegroundColor Green
         }
         catch { Write-Host $_.Exception.Message -ForegroundColor Red; continue }
         $answer = Read-Host 'Généraliser et capturer ce poste en fin de préparation [O/N]'

@@ -946,6 +946,34 @@ Describe 'Capture FOG' {
         }
     }
 
+    It 'crée l''image FOG avec les réglages Windows lus sur le serveur' {
+        InModuleScope Genesis {
+            $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'gmktec 10/26' }
+            $script:FogImageCreated = $false
+            Mock Get-GenesisFogItem {
+                param($Kind)
+                switch ($Kind) {
+                    'os' { @([pscustomobject]@{ id = 1; name = 'Windows 2000/XP' }, [pscustomobject]@{ id = 9; name = 'Windows 10' }, [pscustomobject]@{ id = 50; name = 'Linux' }) }
+                    'imagetype' { @([pscustomobject]@{ id = 2; name = 'Multiple Partition Image - Single Disk (Not Resizable)' }, [pscustomobject]@{ id = 1; name = 'Single Disk - Resizable' }) }
+                    'imagepartitiontype' { @([pscustomobject]@{ id = 1; name = 'Everything' }, [pscustomobject]@{ id = 2; name = 'Partition Table and MBR only' }) }
+                    'storagegroup' { @([pscustomobject]@{ id = 1; name = 'default' }) }
+                    'image' { if ($script:FogImageCreated) { @([pscustomobject]@{ id = 21; name = 'gmktec 10/26' }) } else { @() } }
+                }
+            }
+            $script:FogBodies = @()
+            Mock Invoke-GenesisFogApi { $script:FogBodies += ,$Body; $script:FogImageCreated = $true }
+            $result = New-GenesisFogImage -Settings $settings
+            $result.Image.id | Should -Be 21
+            $body = $script:FogBodies[0]
+            $body.osID | Should -Be 9
+            $body.imageTypeID | Should -Be 1
+            $body.imagePartitionTypeID | Should -Be 1
+            $body.storagegroups | Should -Be @(1)
+            $body.path | Should -Be 'gmktec1026'
+            Should -Invoke Invoke-GenesisFogApi -Exactly -Times 1 -ParameterFilter { $Method -eq 'POST' -and $Path -eq '/fog/image/create' }
+        }
+    }
+
     It 'réutilise un poste FOG connu par son adresse MAC et lui associe l''image' {
         InModuleScope Genesis {
             $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' }

@@ -140,12 +140,13 @@ Prérequis côté FOG :
 
 - API activée (*FOG Configuration > FOG Settings > API System*) ; noter la clé
   API FOG et la clé API de l'utilisateur (*User Management > API Settings*) ;
-- image déjà créée dans *Image Management* (Windows 10/11, *Single Disk -
-  Resizable*) : chaque capture remplace son contenu ;
+- une image dans *Image Management* : si le nom saisi n'existe pas, Genesis
+  propose de la créer (Windows, *Single Disk - Resizable*, toutes les
+  partitions, groupe de stockage par défaut) ; chaque capture remplace son contenu ;
 - démarrage PXE fonctionnel vers ce serveur, poste branché en câble (pas en Wi-Fi).
 
 Au lancement, Genesis demande l'adresse du serveur, les deux clés et le nom de
-l'image, vérifie qu'il joint FOG et que l'image existe, puis demande une
+l'image, vérifie qu'il joint FOG et que l'image existe (ou la crée), puis demande une
 confirmation. Les clés ne sont jamais écrites dans `state.json` : elles sont
 chiffrées pour ce poste (DPAPI machine) et effacées dès que la capture est programmée.
 
