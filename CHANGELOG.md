@@ -2,6 +2,10 @@
 
 ## Non publié
 
+- Nouvelle opération **Capture FOG** (`fog-capture`), décochée par défaut :
+  nettoyage, Sysprep, programmation de la capture par l'API FOG et
+  redémarrage réseau unique ; serveur, clés et image demandés au lancement,
+  clés chiffrées pour le poste et jamais journalisées.
 - Progression affichée en tableau : une ligne par opération, avec état et
   pourcentage mis à jour sur place.
 - Office : la recherche du lien ODT ne plante plus sur les liens sans `href`

@@ -66,6 +66,7 @@ consulter un plan sans appliquer de réglage :
 | NetBird | Installer le client officiel et demander son serveur au lancement ; aucun serveur ni secret préconfiguré, aucune connexion automatique |
 | Windows Update | Rechercher et installer les mises à jour, les mises à jour facultatives et les pilotes proposés ; exécuté en dernier, redémarre et reprend seul si Windows le demande |
 | Mise à niveau Windows | Installer la nouvelle version proposée par Windows Update (ex. 26H2) après les correctifs ; décochée par défaut, à choisir explicitement |
+| Capture FOG | Nettoyer et généraliser Windows (Sysprep), programmer la capture dans FOG puis redémarrer sur le réseau ; décochée par défaut, voir plus bas |
 | Épingles | Préparer Explorateur, Word, Excel, PowerPoint et Outlook classique lorsqu'Office est présent |
 | Debloat | Afficher les programmes installés, laisser le technicien sélectionner les désinstallations et vérifier leur résultat |
 | Imprimantes réseau | Découvrir les imprimantes WSD, proposer leur ajout et ouvrir une recherche de pilote à la demande |
@@ -126,6 +127,60 @@ La restauration conserve les modifications faites entre-temps par l'utilisateur
 et signale les conflits. Elle restaure les réglages sauvegardés, mais ne
 réinstalle pas un logiciel désinstallé et ne désinstalle pas un logiciel ajouté.
 L'heure corrigée reste correcte après restauration de la configuration horaire.
+
+## Capture FOG
+
+L'opération **Capture FOG** transforme le poste préparé en image de référence
+pour un serveur [FOG](https://github.com/FOGProject/fogproject) du réseau local.
+FOG ne capture pas un Windows en marche : Genesis prépare le poste, programme
+la capture par l'API FOG, puis le poste redémarre une fois sur le réseau (PXE)
+et FOG envoie le disque sur le serveur.
+
+Prérequis côté FOG :
+
+- API activée (*FOG Configuration > FOG Settings > API System*) ; noter la clé
+  API FOG et la clé API de l'utilisateur (*User Management > API Settings*) ;
+- image déjà créée dans *Image Management* (Windows 10/11, *Single Disk -
+  Resizable*) : chaque capture remplace son contenu ;
+- démarrage PXE fonctionnel vers ce serveur, poste branché en câble (pas en Wi-Fi).
+
+Au lancement, Genesis demande l'adresse du serveur, les deux clés et le nom de
+l'image, vérifie qu'il joint FOG et que l'image existe, puis demande une
+confirmation. Les clés ne sont jamais écrites dans `state.json` : elles sont
+chiffrées pour ce poste (DPAPI machine) et effacées dès que la capture est programmée.
+
+La capture passe après toutes les autres opérations, y compris Windows Update et
+ses redémarrages : si la reprise automatique tourne au démarrage, elle lance
+aussi la capture. Elle attend tant qu'une opération est en échec. Déroulement :
+
+1. contrôles sans risque : connexion câblée, entrée de démarrage réseau UEFI,
+   serveur FOG, image ; le poste est enregistré dans FOG par son adresse MAC
+   (ou retrouvé) et associé à l'image ;
+2. nettoyage : déchiffrement BitLocker du disque système (attendu jusqu'au bout),
+   veille prolongée désactivée, identité NetBird retirée, applications du Store
+   installées pour un compte sans être provisionnées retirées (elles bloquent Sysprep) ;
+3. `sysprep /generalize /oobe /quit`, puis vérification que Windows est bien généralisé ;
+4. création de la tâche de capture dans FOG et démarrage réseau forcé pour le
+   prochain démarrage uniquement ;
+5. suppression des traces de Genesis (comme **Désinstaller Genesis**) et
+   redémarrage après 15 secondes.
+
+Si Sysprep échoue, rien n'est programmé dans FOG et le motif (extrait de
+`setuperr.log`) s'affiche. Si FOG refuse la tâche après Sysprep, ne pas
+redémarrer sur Windows : créer la tâche *Capture* dans FOG pour ce poste puis
+démarrer sur le réseau.
+
+Limites à connaître :
+
+- Sysprep refuse un Windows mis à niveau sur place : ne pas combiner **Mise à
+  niveau Windows** et **Capture FOG** ; capturer un poste installé directement
+  dans la version voulue ;
+- le démarrage réseau automatique exige un poste UEFI avec une entrée PXE
+  visible ; sinon l'opération s'arrête avant toute modification ;
+- les réglages de session (barre des tâches, Explorateur, etc.) restent sur les
+  comptes déjà présents dans l'image ; les comptes créés au déploiement partent
+  du profil par défaut de Windows ;
+- les comptes locaux, logiciels et réglages machine font partie de l'image.
 
 ## Sources et développement
 

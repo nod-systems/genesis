@@ -22,7 +22,8 @@ function Get-GenesisStepCatalog {
         @('netbird', 'Télécharger NetBird et configurer son serveur (sans connexion)', 'Machine', $true, $false),
         @('taskbar-pins', 'Épingler Explorateur, Word, Excel, PowerPoint, Outlook classique', 'Utilisateur', $true, $true),
         @('windows-update', 'Mettre à jour Windows + les mises à jour facultatives', 'Machine', $true, $false),
-        @('windows-feature-update', 'Mettre à niveau Windows vers la dernière version proposée (ex. 26H2)', 'Machine', $true, $false)
+        @('windows-feature-update', 'Mettre à niveau Windows vers la dernière version proposée (ex. 26H2)', 'Machine', $true, $false),
+        @('fog-capture', 'Généraliser Windows (Sysprep) et capturer l''image dans FOG', 'Machine', $true, $false)
     )) {
         [pscustomobject]@{ Id = $entry[0]; Name = $entry[1]; Context = $entry[2]; ChangesMachine = $entry[3]; Reversible = $entry[4] }
     }
@@ -31,7 +32,8 @@ function Get-GenesisStepCatalog {
 function Get-GenesisStepOrder {
     param([AllowEmptyCollection()][object[]]$Steps = @())
     # Windows Update et la mise à niveau sont très longs et peuvent redémarrer le poste : toujours en dernier.
-    $updateIds = @('windows-update', 'windows-feature-update')
+    # La capture FOG généralise Windows : elle passe après tout le reste.
+    $updateIds = @('windows-update', 'windows-feature-update', 'fog-capture')
     $idOf = { param($item) if ($item -is [string]) { $item } else { [string]$item.Id } }
     $others = @($Steps | Where-Object { (& $idOf $_) -notin $updateIds })
     $updates = foreach ($id in $updateIds) { $Steps | Where-Object { (& $idOf $_) -ceq $id } }
@@ -581,6 +583,16 @@ function Invoke-GenesisRunExecution {
             Write-GenesisConsoleProgress -State $State
             continue
         }
+        if ($step.Id -eq 'fog-capture') {
+            # Sysprep sur un poste incomplet donnerait une image incomplète : la capture attend.
+            $blocker = Get-GenesisFogCaptureBlocker -State $State
+            if ($null -ne $blocker) {
+                $step.Message = $blocker
+                Write-GenesisJson -Path $path -Value $State
+                Write-GenesisConsoleProgress -State $State
+                continue
+            }
+        }
         $step.Status = 'Running'; $step.Percent = 10; $step.Message = 'Sauvegarde et exécution'
         $step.Attempts += 1; $step.ErrorType = $null
         $script:GenesisStepErrors.Remove($step.Id)
@@ -678,6 +690,7 @@ function Start-GenesisRun {
         [string]$ProfilePath,
         [object]$ProfileObject,
         [object]$Choices,
+        [object]$FogSettings,
         [string]$DataRoot,
         [ValidatePattern('^[a-f0-9]{32}$')][string]$RunId
     )
@@ -710,10 +723,14 @@ function Start-GenesisRun {
             })
         }
         Write-GenesisJson -Path (Join-Path $directory 'profile.json') -Value $genesisProfile
+        # Les clés FOG restent hors de state.json, chiffrées pour ce poste.
+        if ($null -ne $FogSettings -and @($genesisProfile.steps) -contains 'fog-capture') { Save-GenesisFogConfiguration -RunDirectory $directory -Settings $FogSettings }
         Write-GenesisJson -Path (Join-Path $directory 'state.json') -Value $state
-        Invoke-GenesisRunExecution -State $state -RunDirectory $directory
+        $result = Invoke-GenesisRunExecution -State $state -RunDirectory $directory
     }
     finally { $lock.Dispose() }
+    Complete-GenesisFogCapture -State $result -DataRoot $root | Out-Null
+    return $result
 }
 
 function Resume-GenesisRun {
@@ -735,9 +752,11 @@ function Resume-GenesisRun {
         if ($state.Status -eq 'Completed') { return $state }
         $directory = Join-Path (Join-Path $root 'runs') $RunId
         Add-GenesisEvent -RunDirectory $directory -EventName 'run_resumed'
-        Invoke-GenesisRunExecution -State $state -RunDirectory $directory
+        $result = Invoke-GenesisRunExecution -State $state -RunDirectory $directory
     }
     finally { $lock.Dispose() }
+    Complete-GenesisFogCapture -State $result -DataRoot $root | Out-Null
+    return $result
 }
 
 $script:GenesisUpdateTaskName = 'Genesis - reprise Windows Update'
@@ -925,6 +944,11 @@ function Invoke-GenesisUpdateContinuation {
             Unregister-GenesisUpdateContinuation
             $continuation.FinishedAt = [datetime]::UtcNow.ToString('o')
             $notice = if ($continuation.Outcome -eq 'Completed') { 'Genesis : mises à jour Windows terminées après {0} redémarrage(s).' -f $continuation.Reboots } else { 'Genesis : mises à jour Windows à vérifier. ' + $lastStep.Message }
+            $captureStep = $state.Steps | Where-Object { $_.Id -eq 'fog-capture' -and $_.Status -ne 'Completed' } | Select-Object -First 1
+            if ($continuation.Outcome -eq 'Completed' -and $null -ne $captureStep) {
+                $captureNotice = Invoke-GenesisContinuationFogCapture -State $state -Step $captureStep -RunDirectory $directory
+                $notice = $notice + ' ' + $captureNotice
+            }
         }
         $state.Status = 'Completed'
         if (@($state.Steps | Where-Object { $_.Status -ne 'Completed' }).Count -gt 0) { $state.Status = 'NeedsAttention' }
@@ -942,9 +966,48 @@ function Invoke-GenesisUpdateContinuation {
     }
     finally { $lock.Dispose() }
     if ($restart) { Restart-GenesisComputer -DelaySeconds 60 -Reason 'Genesis redémarre pour poursuivre les mises à jour Windows.' }
-    elseif ($null -ne $notice) { Send-GenesisSessionMessage -Message $notice }
+    elseif ($null -ne $notice) {
+        Send-GenesisSessionMessage -Message $notice
+        Complete-GenesisFogCapture -State $state -DataRoot $root | Out-Null
+    }
     $message = if ($null -ne $lastStep) { [string]$lastStep.Message } else { '' }
     return [pscustomobject]@{ RunId = $RunId; Outcome = [string]$continuation.Outcome; Message = $message; Reboots = [int]$continuation.Reboots }
+}
+
+function Invoke-GenesisContinuationFogCapture {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Step, [Parameter(Mandatory)][string]$RunDirectory)
+    $path = Join-Path $RunDirectory 'state.json'
+    $blocker = Get-GenesisFogCaptureBlocker -State $State
+    if ($null -ne $blocker) {
+        $Step.Message = $blocker
+        Write-GenesisJson -Path $path -Value $State
+        return ('Capture FOG non lancée : ' + $blocker)
+    }
+    $Step.Status = 'Running'; $Step.Percent = 5; $Step.Message = 'Capture FOG après les mises à jour Windows'
+    $Step.Attempts += 1; $Step.ErrorType = $null
+    $Step.StartedAt = [datetime]::UtcNow.ToString('o'); $Step.FinishedAt = $null
+    Write-GenesisJson -Path $path -Value $State
+    Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_started' -StepId 'fog-capture'
+    $notice = ''
+    try {
+        $result = Invoke-GenesisCustomization -StepId 'fog-capture' -RunDirectory $RunDirectory
+        $Step.Status = $result.Status; $Step.Percent = $result.Percent; $Step.Message = $result.Message
+        $notice = if ($result.Status -eq 'Completed') { 'Capture FOG programmée : redémarrage sur le réseau.' } else { 'Capture FOG à vérifier : ' + $result.Message }
+        Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_finished' -StepId 'fog-capture'
+    }
+    catch {
+        $Step.Status = 'Failed'; $Step.Percent = 0
+        $Step.Message = 'Échec de la capture FOG : reprendre Genesis manuellement.'
+        $Step.ErrorType = $_.Exception.GetType().FullName
+        # Le motif peut contenir des données privées : affiché dans la session, jamais écrit dans state.json.
+        $reason = ([string]$_.Exception.Message -replace '[\r\n\t]+', ' ').Trim()
+        if ($reason.Length -gt 300) { $reason = $reason.Substring(0, 297) + '...' }
+        $notice = 'Échec de la capture FOG : ' + $reason
+        Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_failed' -StepId 'fog-capture' -ErrorType $Step.ErrorType
+    }
+    $Step.FinishedAt = [datetime]::UtcNow.ToString('o')
+    Write-GenesisJson -Path $path -Value $State
+    return $notice
 }
 
 function Request-GenesisUpdateRestart {
@@ -1162,6 +1225,10 @@ function Get-GenesisStepCompletion {
                 $done = (-not [string]::IsNullOrWhiteSpace($path)) -and (Test-GenesisNetBirdManagementConfigured)
                 $detail = if ($done) { 'NetBird est installé et son serveur est configuré ; aucune connexion lancée.' } else { 'NetBird absent ou serveur non configuré.' }
             }
+            'fog-capture' {
+                $done = $false
+                $detail = 'À choisir explicitement : généralise Windows puis redémarre sur le réseau pour la capture FOG.'
+            }
             'taskbar-pins' {
                 $state = Get-GenesisTaskbarState
                 $expected = @('Word.lnk', 'Excel.lnk', 'PowerPoint.lnk', 'Outlook classique.lnk')
@@ -1190,7 +1257,8 @@ function Get-GenesisStepCompletion {
 function Test-GenesisStepSelectedByDefault {
     param([Parameter(Mandatory)][string]$StepId)
     # Une mise à niveau de version est longue et change Windows : choix explicite du technicien.
-    return ($StepId -notin @('windows-feature-update'))
+    # La capture FOG généralise le poste : jamais cochée d'office.
+    return ($StepId -notin @('windows-feature-update', 'fog-capture'))
 }
 
 function Get-GenesisMenuDoneMarker {
@@ -1713,11 +1781,24 @@ function Show-GenesisMenu {
             switch ($choice.ToUpperInvariant()) {
                 '1' {
                     $selection = Show-GenesisTaskChecklist -ProfilePath $ProfilePath -ProfileObject $ProfileObject -DataRoot $DataRoot
+                    $fogSettings = $null
+                    if ($null -ne $selection -and @($selection.Profile.steps) -contains 'fog-capture') {
+                        # Questions posées maintenant : la capture peut avoir lieu après redémarrage, sans session.
+                        $fogSettings = Read-GenesisFogConfiguration
+                        if ($null -eq $fogSettings) {
+                            $selection.Profile.steps = @($selection.Profile.steps | Where-Object { $_ -ne 'fog-capture' })
+                            Write-Host 'Capture FOG retirée de la sélection.' -ForegroundColor Yellow
+                            if ($selection.Profile.steps.Count -eq 0) { $selection = $null }
+                        }
+                    }
                     if ($null -ne $selection) {
-                        $run = Start-GenesisRun -ProfileObject $selection.Profile -Choices $selection.Choices -DataRoot $DataRoot
+                        $run = Start-GenesisRun -ProfileObject $selection.Profile -Choices $selection.Choices -FogSettings $fogSettings -DataRoot $DataRoot
                         Write-Host ("RunId : {0}" -f $run.RunId) -ForegroundColor Cyan
                         Show-GenesisProgressTable -State $run
-                        Request-GenesisUpdateRestart -State $run -DataRoot $DataRoot
+                        if (@($run.Steps | Where-Object { $_.Id -eq 'fog-capture' -and $_.Status -eq 'Completed' }).Count -gt 0) {
+                            Write-Host ('Capture FOG programmée ; traces Genesis supprimées. Redémarrage sur le réseau dans {0} secondes.' -f $script:GenesisFogRestartDelaySeconds) -ForegroundColor Green
+                        }
+                        else { Request-GenesisUpdateRestart -State $run -DataRoot $DataRoot }
                     }
                 }
                 '2' {

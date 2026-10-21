@@ -149,8 +149,9 @@ Describe 'Mise a niveau de version Windows' {
             Test-GenesisStepSelectedByDefault -StepId 'windows-update' | Should -BeTrue
         }
         $windowsProfile = Get-Content (Join-Path $script:Repository 'profiles/windows.json') -Raw | ConvertFrom-Json
-        $windowsProfile.steps[-2] | Should -Be 'windows-update'
-        $windowsProfile.steps[-1] | Should -Be 'windows-feature-update'
+        $windowsProfile.steps[-3] | Should -Be 'windows-update'
+        $windowsProfile.steps[-2] | Should -Be 'windows-feature-update'
+        $windowsProfile.steps[-1] | Should -Be 'fog-capture'
     }
 
     It 'affiche la version proposee dans la checklist' {
@@ -891,8 +892,9 @@ Describe 'Reprise de Windows Update apres redemarrage' {
             $ordered = @(Get-GenesisStepOrder -Steps @('windows-feature-update', 'windows-update', 'explorer-home', 'power-ac'))
             ($ordered -join ',') | Should -Be 'explorer-home,power-ac,windows-update,windows-feature-update'
             $catalog = @(Get-GenesisStepCatalog | ForEach-Object { $_.Id })
-            $catalog[-2] | Should -Be 'windows-update'
-            $catalog[-1] | Should -Be 'windows-feature-update'
+            $catalog[-3] | Should -Be 'windows-update'
+            $catalog[-2] | Should -Be 'windows-feature-update'
+            $catalog[-1] | Should -Be 'fog-capture'
             $objects = @(Get-GenesisStepOrder -Steps @([pscustomobject]@{ Id = 'windows-update' }, [pscustomobject]@{ Id = 'time-sync' }))
             $objects[0].Id | Should -Be 'time-sync'
         }
@@ -913,5 +915,79 @@ Describe 'Reprise de Windows Update apres redemarrage' {
             $Action[0].Arguments -like ('*-File "' + $copy + '" -Action ContinueUpdates -RunId ' + $run.RunId + '*')
         }
         (Get-Content (Join-Path $run.Directory 'update-continuation.json') -Raw | ConvertFrom-Json).Outcome | Should -Be 'Scheduled'
+    }
+}
+
+Describe 'Capture FOG dans une preparation' {
+    BeforeEach {
+        $script:DataRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        Mock Get-GenesisMachineId -ModuleName Genesis { 'machine-fictive' }
+        Mock Get-GenesisUserSid -ModuleName Genesis { 'S-1-5-21-technicien' }
+        Mock Protect-GenesisSecretText -ModuleName Genesis { 'CHIFFRE-FICTIF' }
+        Mock Uninstall-GenesisFootprint -ModuleName Genesis { [pscustomobject]@{ Removed = @(); Failed = @(); Message = '' } }
+        Mock Restart-GenesisComputer -ModuleName Genesis {}
+        $script:FogSettings = [pscustomobject]@{ Server = 'fog.example.test'; ApiToken = 'cle-api-fictive'; UserToken = 'cle-user-fictive'; ImageName = 'Win11-Ref' }
+    }
+
+    It 'nest jamais cochee par defaut et passe apres les mises a jour' {
+        InModuleScope Genesis {
+            Test-GenesisStepSelectedByDefault -StepId 'fog-capture' | Should -BeFalse
+            @(Get-GenesisStepOrder -Steps @('fog-capture', 'windows-update', 'explorer-home')) | Should -Be @('explorer-home', 'windows-update', 'fog-capture')
+        }
+    }
+
+    It 'attend la fin des mises a jour Windows avant de generaliser' {
+        Mock Invoke-GenesisCustomization -ModuleName Genesis {
+            param($StepId)
+            if ($StepId -eq 'windows-update') { return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Redémarrage requis' } }
+            [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Fait' }
+        }
+        $profileObject = [pscustomobject]@{ schemaVersion = 1; id = 'capture'; name = 'Capture'; steps = @('windows-update', 'fog-capture') }
+        $run = Start-GenesisRun -ProfileObject $profileObject -FogSettings $script:FogSettings -DataRoot $script:DataRoot
+        Should -Invoke Invoke-GenesisCustomization -ModuleName Genesis -Exactly -Times 0 -ParameterFilter { $StepId -eq 'fog-capture' }
+        $capture = $run.Steps | Where-Object Id -eq 'fog-capture'
+        $capture.Status | Should -Be 'Pending'
+        $capture.Message | Should -Match 'mises à jour'
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 0
+    }
+
+    It 'garde les cles FOG hors de state.json puis efface Genesis et redemarre apres la capture' {
+        Mock Invoke-GenesisCustomization -ModuleName Genesis { [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Capture programmée' } }
+        $profileObject = [pscustomobject]@{ schemaVersion = 1; id = 'capture'; name = 'Capture'; steps = @('explorer-home', 'fog-capture') }
+        $run = Start-GenesisRun -ProfileObject $profileObject -FogSettings $script:FogSettings -DataRoot $script:DataRoot
+        $directory = Join-Path (Join-Path $script:DataRoot 'runs') $run.RunId
+        (Get-Content (Join-Path $directory 'state.json') -Raw) | Should -Not -Match 'cle-api-fictive|cle-user-fictive'
+        (Get-Content (Join-Path $directory 'fog-capture.protected') -Raw).Trim() | Should -Be 'CHIFFRE-FICTIF'
+        Should -Invoke Protect-GenesisSecretText -ModuleName Genesis -Exactly -Times 1 -ParameterFilter { $Text -match 'http://fog\.example\.test' }
+        Should -Invoke Uninstall-GenesisFootprint -ModuleName Genesis -Exactly -Times 1
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 1
+    }
+
+    It 'lance la capture depuis la reprise une fois Windows a jour' {
+        $runId = [guid]::NewGuid().ToString('N')
+        $directory = Join-Path (Join-Path $script:DataRoot 'runs') $runId
+        New-Item -Path $directory -ItemType Directory -Force | Out-Null
+        $state = [pscustomobject]@{
+            SchemaVersion = 1; GenesisVersion = (Get-Module Genesis).Version.ToString(); RunId = $runId
+            MachineId = 'machine-fictive'; UserSid = 'S-1-5-21-technicien'; ProfileId = 'windows'
+            CreatedAt = '2026-10-19T08:00:00Z'; FinishedAt = $null; Status = 'NeedsAttention'; Choices = [ordered]@{}
+            Steps = @(
+                [pscustomobject]@{ Id = 'windows-update'; Status = 'NeedsAttention'; Attempts = 1; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 100; Message = 'Redémarrage requis'; UndoStatus = 'NotAvailable' }
+                [pscustomobject]@{ Id = 'fog-capture'; Status = 'Pending'; Attempts = 0; StartedAt = $null; FinishedAt = $null; ErrorType = $null; Percent = 0; Message = ''; UndoStatus = 'NotAvailable' }
+            )
+        }
+        $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $directory 'state.json') -Encoding UTF8
+        [pscustomobject]@{ SchemaVersion = 1; RunId = $runId; MachineId = 'machine-fictive'; Reboots = 1; MaxReboots = 8; RegisteredAt = '2026-10-19T08:30:00Z'; FinishedAt = $null; Outcome = 'Scheduled' } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'update-continuation.json') -Encoding UTF8
+        Mock Unregister-GenesisUpdateContinuation -ModuleName Genesis {}
+        Mock Send-GenesisSessionMessage -ModuleName Genesis {}
+        Mock Invoke-GenesisWindowsUpdate -ModuleName Genesis { [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'À jour.' } }
+        Mock Invoke-GenesisCustomization -ModuleName Genesis { [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Capture programmée' } }
+        $result = Invoke-GenesisUpdateContinuation -RunId $runId -DataRoot $script:DataRoot -RetryDelaySeconds 0
+        $result.Outcome | Should -Be 'Completed'
+        Should -Invoke Invoke-GenesisCustomization -ModuleName Genesis -Exactly -Times 1 -ParameterFilter { $StepId -eq 'fog-capture' }
+        Should -Invoke Send-GenesisSessionMessage -ModuleName Genesis -Exactly -Times 1 -ParameterFilter { $Message -match 'Capture FOG programmée' }
+        Should -Invoke Uninstall-GenesisFootprint -ModuleName Genesis -Exactly -Times 1
+        Should -Invoke Restart-GenesisComputer -ModuleName Genesis -Exactly -Times 1
     }
 }

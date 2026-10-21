@@ -911,3 +911,163 @@ Describe 'Protection du répertoire de données' {
         }
     }
 }
+
+Describe 'Capture FOG' {
+    It 'normalise l''adresse du serveur FOG saisie par le technicien' {
+        InModuleScope Genesis {
+            ConvertTo-GenesisFogServerUrl -Value ' fog.example.test ' | Should -Be 'http://fog.example.test'
+            ConvertTo-GenesisFogServerUrl -Value 'http://fog.example.test/fog/management/index.php' | Should -Be 'http://fog.example.test'
+            ConvertTo-GenesisFogServerUrl -Value 'https://fog.example.test:8443/' | Should -Be 'https://fog.example.test:8443'
+            { ConvertTo-GenesisFogServerUrl -Value 'fog.example.test/fog/?node=home' } | Should -Throw '*requête*'
+            { ConvertTo-GenesisFogServerUrl -Value 'ftp://fog.example.test' } | Should -Throw '*invalide*'
+        }
+    }
+
+    It 'choisit l''entrée UEFI réseau IPv4 dans une liste bcdedit française' {
+        InModuleScope Genesis {
+            $text = @(
+                'Gestionnaire de démarrage du microprogramme', '--------------------------------', 'identificateur          {fwbootmgr}', 'displayorder            {bootmgr}', '                        {11111111-1111-1111-1111-111111111111}', '',
+                'Gestionnaire de démarrage Windows', '--------------------------------', 'identificateur          {bootmgr}', 'description             Windows Boot Manager', '',
+                'Application du microprogramme (101fffff)', '--------------------------------', 'identificateur          {22222222-2222-2222-2222-222222222222}', 'description             UEFI: PXE IPv6 Intel(R) Ethernet', '',
+                'Application du microprogramme (101fffff)', '--------------------------------', 'identificateur          {11111111-1111-1111-1111-111111111111}', 'description             UEFI: PXE IPv4 Intel(R) Ethernet'
+            ) -join "`r`n"
+            $entries = @(ConvertFrom-GenesisFirmwareBootList -Text $text)
+            $entries.Count | Should -Be 4
+            (Select-GenesisPxeBootEntry -Entries $entries).Id | Should -Be '{11111111-1111-1111-1111-111111111111}'
+            Select-GenesisPxeBootEntry -Entries @($entries[1]) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'réutilise un poste FOG connu par son adresse MAC et lui associe l''image' {
+        InModuleScope Genesis {
+            $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' }
+            Mock Get-GenesisFogItem {
+                param($Kind)
+                switch ($Kind) {
+                    'macaddressassociation' { @([pscustomobject]@{ hostID = 7; mac = 'AA:BB:CC:00:11:22' }) }
+                    'host' { @([pscustomobject]@{ id = 7; name = 'PC-ANCIEN'; imageID = 1 }) }
+                }
+            }
+            $script:FogCalls = @()
+            Mock Invoke-GenesisFogApi { $script:FogCalls += ,([pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body }) }
+            $result = Register-GenesisFogHost -Settings $settings -Mac 'aa-bb-cc-00-11-22' -ImageId 4 -Name 'PC-NEUF'
+            $result.Id | Should -Be 7
+            $result.Created | Should -BeFalse
+            $script:FogCalls.Count | Should -Be 1
+            $script:FogCalls[0].Method | Should -Be 'PUT'
+            $script:FogCalls[0].Path | Should -Be '/fog/host/7/edit'
+            $script:FogCalls[0].Body.imageID | Should -Be 4
+        }
+    }
+
+    It 'enregistre un nouveau poste FOG avec un nom unique' {
+        InModuleScope Genesis {
+            $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' }
+            Mock Get-GenesisFogItem {
+                param($Kind)
+                if ($Kind -eq 'host') { @([pscustomobject]@{ id = 3; name = 'DESKTOP-ABC'; imageID = 4 }) } else { @() }
+            }
+            $script:FogCalls = @()
+            Mock Invoke-GenesisFogApi { $script:FogCalls += ,([pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body }); [pscustomobject]@{ id = 12 } }
+            $result = Register-GenesisFogHost -Settings $settings -Mac 'aabbcc001122' -ImageId 4 -Name 'DESKTOP-ABC'
+            $result.Id | Should -Be 12
+            $result.Created | Should -BeTrue
+            $script:FogCalls[0].Path | Should -Be '/fog/host/create'
+            $script:FogCalls[0].Body.name | Should -Be 'GAABBCC001122'
+            $script:FogCalls[0].Body.macs | Should -Be @('aa:bb:cc:00:11:22')
+        }
+    }
+
+    Context 'Déroulement de la capture' {
+        BeforeEach {
+            Mock Read-GenesisFogConfigurationFile -ModuleName Genesis { [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' } }
+            Mock Set-GenesisStepProgress -ModuleName Genesis {}
+            Mock Get-GenesisSysprepBlocker -ModuleName Genesis { $null }
+            Mock Get-GenesisFogNetworkAdapter -ModuleName Genesis { [pscustomobject]@{ Name = 'Ethernet'; Mac = 'aa:bb:cc:00:11:22' } }
+            Mock Get-GenesisPxeBootEntry -ModuleName Genesis { [pscustomobject]@{ Id = '{11111111-1111-1111-1111-111111111111}'; Description = 'UEFI: PXE IPv4' } }
+            Mock Get-GenesisFogImage -ModuleName Genesis { [pscustomobject]@{ id = 4; name = 'Win11-Ref' } }
+            Mock Register-GenesisFogHost -ModuleName Genesis { [pscustomobject]@{ Id = 7; Created = $false } }
+            Mock Disable-GenesisSystemEncryption -ModuleName Genesis { $false }
+            Mock Invoke-GenesisNativeCommand -ModuleName Genesis { [pscustomobject]@{ ExitCode = 0; Output = ''; ErrorOutput = '' } }
+            Mock Clear-GenesisNetBirdIdentity -ModuleName Genesis { $true }
+            Mock Remove-GenesisSysprepBlockingAppx -ModuleName Genesis { 0 }
+            Mock Test-GenesisWindowsGeneralized -ModuleName Genesis { $false }
+            Mock Invoke-GenesisSysprep -ModuleName Genesis {}
+            Mock New-GenesisFogCaptureTask -ModuleName Genesis {}
+            Mock Set-GenesisNextBootEntry -ModuleName Genesis {}
+            Mock Remove-GenesisFogConfigurationFile -ModuleName Genesis {}
+        }
+
+        It 'généralise, programme la capture puis force un démarrage réseau' {
+            InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+                param($Root)
+                $result = Invoke-GenesisFogCapture -RunDirectory $Root
+                $result.Status | Should -Be 'Completed'
+                $result.Message | Should -Match 'Win11-Ref'
+                Should -Invoke Invoke-GenesisSysprep -Exactly -Times 1
+                Should -Invoke New-GenesisFogCaptureTask -Exactly -Times 1 -ParameterFilter { $HostId -eq 7 }
+                Should -Invoke Set-GenesisNextBootEntry -Exactly -Times 1 -ParameterFilter { $Id -eq '{11111111-1111-1111-1111-111111111111}' }
+                Should -Invoke Invoke-GenesisNativeCommand -Exactly -Times 1 -ParameterFilter { $FilePath -eq 'powercfg.exe' -and $Arguments -eq '/hibernate off' }
+                Should -Invoke Remove-GenesisFogConfigurationFile -Exactly -Times 1
+            }
+        }
+
+        It 'ne touche pas au poste quand le démarrage réseau est introuvable' {
+            Mock Get-GenesisPxeBootEntry -ModuleName Genesis { throw 'Aucune entrée de démarrage réseau (PXE).' }
+            InModuleScope Genesis {
+                { Invoke-GenesisFogCapture -RunDirectory $TestDrive } | Should -Throw '*PXE*'
+                Should -Invoke Disable-GenesisSystemEncryption -Exactly -Times 0
+                Should -Invoke Invoke-GenesisSysprep -Exactly -Times 0
+                Should -Invoke New-GenesisFogCaptureTask -Exactly -Times 0
+            }
+        }
+
+        It 'ne programme pas la capture si Sysprep échoue' {
+            Mock Invoke-GenesisSysprep -ModuleName Genesis { throw 'Sysprep n''a pas généralisé Windows.' }
+            InModuleScope Genesis {
+                { Invoke-GenesisFogCapture -RunDirectory $TestDrive } | Should -Throw '*Sysprep*'
+                Should -Invoke New-GenesisFogCaptureTask -Exactly -Times 0
+                Should -Invoke Set-GenesisNextBootEntry -Exactly -Times 0
+            }
+        }
+
+        It 'reprend un poste déjà généralisé sans relancer Sysprep' {
+            Mock Test-GenesisWindowsGeneralized -ModuleName Genesis { $true }
+            InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+                param($Root)
+                (Invoke-GenesisFogCapture -RunDirectory $Root).Status | Should -Be 'Completed'
+                Should -Invoke Get-GenesisSysprepBlocker -Exactly -Times 0
+                Should -Invoke Invoke-GenesisSysprep -Exactly -Times 0
+                Should -Invoke New-GenesisFogCaptureTask -Exactly -Times 1
+            }
+        }
+
+        It 'indique quoi faire quand FOG refuse la tâche après Sysprep' {
+            Mock New-GenesisFogCaptureTask -ModuleName Genesis { throw 'Réponse FOG refusée.' }
+            InModuleScope Genesis {
+                { Invoke-GenesisFogCapture -RunDirectory $TestDrive } | Should -Throw '*ne pas redémarrer sur Windows*aa:bb:cc:00:11:22*'
+                Should -Invoke Set-GenesisNextBootEntry -Exactly -Times 0
+            }
+        }
+
+        It 'attend une intervention quand Sysprep serait refusé' {
+            Mock Get-GenesisSysprepBlocker -ModuleName Genesis { 'Un redémarrage est en attente.' }
+            InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+                param($Root)
+                $result = Invoke-GenesisFogCapture -RunDirectory $Root
+                $result.Status | Should -Be 'NeedsAttention'
+                Should -Invoke Register-GenesisFogHost -Exactly -Times 0
+                Should -Invoke Invoke-GenesisSysprep -Exactly -Times 0
+            }
+        }
+
+        It 'demande de relancer depuis le menu sans paramètres FOG' {
+            Mock Read-GenesisFogConfigurationFile -ModuleName Genesis { $null }
+            InModuleScope Genesis -Parameters @{ Root = $TestDrive } {
+                param($Root)
+                (Invoke-GenesisFogCapture -RunDirectory $Root).Status | Should -Be 'NeedsAttention'
+                Should -Invoke Invoke-GenesisSysprep -Exactly -Times 0
+            }
+        }
+    }
+}
