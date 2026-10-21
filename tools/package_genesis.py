@@ -17,6 +17,7 @@ RELEASE_FILES = (
     "profiles/windows.json",
     "install.ps1",
     "README.md",
+    "CHANGELOG.md",
 )
 
 PORTABLE_PROFILE_FILES = {
@@ -91,14 +92,16 @@ def build_portable_script(source: Path) -> bytes:
 param(
     [ValidateSet(
         'Menu', 'Gui', 'Inventory', 'Plan', 'Run', 'Resume', 'Status', 'Catalog', 'Undo',
-        'ConfirmTaskbar'
+        'ConfirmTaskbar', 'ContinueUpdates', 'UpdateWorker'
     )]
     [string]$Action = 'Menu',
     [ValidateSet('base', 'windows')]
     [string]$ProfileId = 'windows',
     [string]$ProfilePath,
     [string]$DataRoot,
-    [string]$RunId
+    [string]$RunId,
+    [ValidateSet('Quality', 'Feature')]
+    [string]$UpdateScope = 'Quality'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,6 +120,8 @@ else {
     $profileArguments.ProfilePath = $ProfilePath
 }
 $runControlArguments = @{ RunId = $RunId; DataRoot = $DataRoot; WhatIf = $WhatIfPreference }
+# La reprise après redémarrage relance ce fichier unique depuis le répertoire protégé.
+$script:GenesisPortablePath = $PSCommandPath
 
 switch ($Action) {
     'Menu' { Show-GenesisMenu @profileArguments -DataRoot $DataRoot }
@@ -137,6 +142,13 @@ switch ($Action) {
     'Status' { Get-GenesisRun -RunId $RunId -DataRoot $DataRoot | ConvertTo-Json -Depth 16 }
     'Undo' { Undo-GenesisRun @runControlArguments | ConvertTo-Json -Depth 16 }
     'ConfirmTaskbar' { Confirm-GenesisTaskbar @runControlArguments | ConvertTo-Json -Depth 16 }
+    'ContinueUpdates' {
+        Invoke-GenesisUpdateContinuation -RunId $RunId -DataRoot $DataRoot | ConvertTo-Json -Depth 8
+    }
+    'UpdateWorker' {
+        $worker = Invoke-GenesisUpdateWorker -RunId $RunId -DataRoot $DataRoot -Scope $UpdateScope
+        $worker | ConvertTo-Json -Depth 8
+    }
 }
 """
     content = header + _flatten_module(source)

@@ -327,9 +327,30 @@ function Invoke-GenesisNativeCommand {
 function Get-GenesisWindowsUpdateSearchCriterion {
     [CmdletBinding()]
     param()
-    # Sans filtre de classification, Windows Update remonte aussi les mises à jour
-    # facultatives et les pilotes proposés par le fournisseur.
-    return 'IsInstalled=0 and IsHidden=0'
+    # Sans DeploymentAction explicite, Windows Update ne renvoie que les installations
+    # obligatoires : les mises à jour facultatives et les mises à niveau (ex. 26H2) sont
+    # proposées en OptionalInstallation.
+    return "IsInstalled=0 and IsHidden=0 and DeploymentAction='Installation' or IsInstalled=0 and IsHidden=0 and DeploymentAction='OptionalInstallation'"
+}
+
+# Catégorie Windows Update « Upgrades » : mises à niveau de version de Windows.
+$script:GenesisFeatureUpdateCategoryId = '3689bdc8-b205-4af4-8d4a-a63924c5e9d5'
+
+function Test-GenesisFeatureUpdate {
+    param([Parameter(Mandatory)]$Update)
+    $categories = try { @($Update.Categories) } catch { @() }
+    foreach ($category in $categories) {
+        if ([string]$category.CategoryID -eq $script:GenesisFeatureUpdateCategoryId) { return $true }
+    }
+    return $false
+}
+
+function Select-GenesisWindowsUpdate {
+    param([AllowEmptyCollection()][object[]]$Updates = @(), [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality')
+    @($Updates | Where-Object {
+            -not [bool]$_.IsInstalled -and -not [bool]$_.IsHidden -and
+            ((Test-GenesisFeatureUpdate -Update $_) -eq ($Scope -eq 'Feature'))
+        })
 }
 
 function New-GenesisWindowsUpdateCollection {
@@ -376,49 +397,50 @@ function Get-GenesisWindowsCurrentVersion {
 function Get-GenesisWindowsVersionStatus {
     [CmdletBinding()]
     param([object]$Session)
+    # La checklist interroge cet état pour deux opérations : une seule recherche suffit.
+    $cache = Get-Variable -Scope Script -Name GenesisWindowsVersionStatusCache -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $Session -and $null -ne $cache -and ([datetime]::UtcNow - $cache.At).TotalMinutes -lt 5) { return $cache.Status }
     $current = Get-GenesisWindowsCurrentVersion
     $latest = $current.Label
     $availableCount = 0
-    $featureCandidates = @()
+    $featureTitle = $null
     $scanSucceeded = $false
     $scanError = $null
     try {
         if ($null -eq $Session) { $Session = Get-GenesisWindowsUpdateSession }
         $searcher = $Session.CreateUpdateSearcher()
         $result = $searcher.Search((Get-GenesisWindowsUpdateSearchCriterion))
-        $available = @($result.Updates | Where-Object { -not [bool]$_.IsInstalled -and -not [bool]$_.IsHidden })
-        $availableCount = $available.Count
-        foreach ($update in $available) {
-            $title = [string]$update.Title
-            if ($title -match '(?i)(?:Windows 11|Windows 10).{0,60}version\s+(\d{2}H\d)') {
-                $featureCandidates += [pscustomobject]@{ Version = $Matches[1]; Title = $title }
-            }
-        }
+        $updates = @($result.Updates)
+        $availableCount = @(Select-GenesisWindowsUpdate -Updates $updates -Scope Quality).Count
+        $features = @(Select-GenesisWindowsUpdate -Updates $updates -Scope Feature)
         $scanSucceeded = $true
-        if ($featureCandidates.Count -gt 0) {
-            $latest = [string](@($featureCandidates | Sort-Object @{ Expression = { [int](($_.Version -replace 'H', '')) }; Descending = $true } | Select-Object -First 1).Title)
+        if ($features.Count -gt 0) {
+            $featureTitle = [string](@($features | Sort-Object @{ Expression = {
+                            if ([string]$_.Title -match '(?i)version\s+(\d{2})H(\d)') { [int]($Matches[1] + $Matches[2]) } else { 0 }
+                        }; Descending = $true
+                    } | Select-Object -First 1).Title)
+            $latest = $featureTitle
         }
-        elseif ($availableCount -eq 0) {
-            $latest = 'Aucune mise à jour proposée par Windows Update'
-        }
-        else {
-            $latest = 'Aucune nouvelle version de Windows détectée'
-        }
+        elseif ($availableCount -eq 0) { $latest = 'Aucune mise à jour proposée par Windows Update' }
+        else { $latest = 'Aucune nouvelle version de Windows détectée' }
     }
     catch {
         $scanError = $_.Exception.Message
         $latest = 'Recherche Windows Update indisponible'
     }
-    [pscustomobject]@{
+    $status = [pscustomobject]@{
         Current = $current.Label
         CurrentVersion = $current.DisplayVersion
         CurrentBuild = $current.Build
         Latest = $latest
         LatestVersion = $latest
         AvailableCount = $availableCount
+        FeatureUpdate = $featureTitle
         ScanSucceeded = $scanSucceeded
         Error = $scanError
     }
+    if ($scanSucceeded) { $script:GenesisWindowsVersionStatusCache = [pscustomobject]@{ At = [datetime]::UtcNow; Status = $status } }
+    return $status
 }
 
 function Invoke-GenesisWindowsUpdate {
@@ -426,14 +448,18 @@ function Invoke-GenesisWindowsUpdate {
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
         [object]$Session,
-        [ValidateRange(1, 5)][int]$MaxPasses = 3
+        [ValidateRange(1, 5)][int]$MaxPasses = 3,
+        [ValidateSet('Quality', 'Feature')][string]$Scope = 'Quality'
     )
     if ($env:OS -ne 'Windows_NT') { throw 'Windows Update est disponible sur Windows uniquement.' }
     if ($null -eq $Session) { $Session = Get-GenesisWindowsUpdateSession }
+    $stepId = if ($Scope -eq 'Feature') { 'windows-feature-update' } else { 'windows-update' }
+    $label = if ($Scope -eq 'Feature') { 'mise à niveau de Windows' } else { 'mise(s) à jour' }
     $criteria = Get-GenesisWindowsUpdateSearchCriterion
-    $logPath = Join-Path $RunDirectory 'windows-update.json'
+    $logPath = Join-Path $RunDirectory ($stepId + '.json')
     $journal = [ordered]@{
         SchemaVersion = 1
+        Scope = $Scope
         SearchCriteria = $criteria
         StartedAt = [datetime]::UtcNow.ToString('o')
         FinishedAt = $null
@@ -443,15 +469,19 @@ function Invoke-GenesisWindowsUpdate {
     }
     Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
     for ($passNumber = 1; $passNumber -le $MaxPasses; $passNumber++) {
-        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 10 -Message ("Recherche Windows Update (passe {0}/{1})" -f $passNumber, $MaxPasses)
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 10 -Message ("Recherche Windows Update (passe {0}/{1})" -f $passNumber, $MaxPasses)
         $searcher = $Session.CreateUpdateSearcher()
         $searchResult = $searcher.Search($criteria)
-        $available = @($searchResult.Updates | Where-Object { -not [bool]$_.IsInstalled -and -not [bool]$_.IsHidden })
+        $available = @(Select-GenesisWindowsUpdate -Updates @($searchResult.Updates) -Scope $Scope)
         if ($available.Count -eq 0) {
             $journal.AvailableAtEnd = 0
             $journal.FinishedAt = [datetime]::UtcNow.ToString('o')
             Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
-            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 100 -Message 'Windows est à jour ; aucune mise à jour facultative disponible.'
+            if ($Scope -eq 'Feature') {
+                Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Aucune mise à niveau de Windows proposée.'
+                return [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Windows est à la dernière version proposée.' }
+            }
+            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Windows est à jour ; aucune mise à jour facultative disponible.'
             return [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Windows et les mises à jour facultatives sont à jour.' }
         }
 
@@ -462,14 +492,14 @@ function Invoke-GenesisWindowsUpdate {
             [void]$updates.Add($update)
             $titles += [string]$update.Title
         }
-        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 30 -Message ("{0} mise(s) à jour détectée(s) ; téléchargement" -f $available.Count)
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 30 -Message ("{0} {1} détectée(s) ; téléchargement" -f $available.Count, $label)
         $downloader = $Session.CreateUpdateDownloader()
         $downloader.Updates = $updates
         $downloadResult = $downloader.Download()
         $downloadCode = Get-GenesisWindowsUpdateResultCode -Result $downloadResult
         if ($downloadCode -notin @(2, 3)) { throw ("Téléchargement Windows Update échoué (code {0})." -f $downloadCode) }
 
-        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 65 -Message ("Installation de {0} mise(s) à jour" -f $available.Count)
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 65 -Message ("Installation : {0}" -f ($titles -join ', '))
         $installer = $Session.CreateUpdateInstaller()
         $installer.Updates = $updates
         $installResult = $installer.Install()
@@ -489,14 +519,14 @@ function Invoke-GenesisWindowsUpdate {
         if ($rebootRequired) {
             $journal.FinishedAt = [datetime]::UtcNow.ToString('o')
             Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
-            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 100 -Message 'Redémarrage requis ; redémarrer puis reprendre Genesis.'
+            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Redémarrage requis ; redémarrer puis reprendre Genesis.'
             return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Windows Update demande un redémarrage. Redémarrer puis utiliser Resume Genesis.' }
         }
     }
     $journal.FinishedAt = [datetime]::UtcNow.ToString('o')
     $journal.AvailableAtEnd = $null
     Write-GenesisJson -Path $logPath -Value ([pscustomobject]$journal)
-    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'windows-update' -Percent 100 -Message 'Plusieurs passes exécutées ; reprendre pour rechercher les mises à jour restantes.'
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId $stepId -Percent 100 -Message 'Plusieurs passes exécutées ; reprendre pour rechercher les mises à jour restantes.'
     [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 100; Message = 'Des mises à jour restent proposées après plusieurs passes ; reprendre Genesis.' }
 }
 
@@ -982,13 +1012,19 @@ function Get-GenesisOfficeDeploymentToolUri {
     throw 'Téléchargement officiel de l''Office Deployment Tool Microsoft introuvable.'
 }
 
-function Assert-GenesisMicrosoftSignature {
-    param([Parameter(Mandatory)][string]$Path)
+function Assert-GenesisPublisherSignature {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Publisher)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
     if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
-        throw 'L''exécutable Office ne possède pas une signature Microsoft valide.'
+        $signature.SignerCertificate.Subject -notmatch ('(?:^|,\s*)O=' + [regex]::Escape($Publisher) + '(?:,|$)')) {
+        throw "L'installateur $([IO.Path]::GetFileName($Path)) ne possède pas une signature $Publisher valide ; programme non exécuté."
     }
+}
+
+function Assert-GenesisMicrosoftSignature {
+    param([Parameter(Mandatory)][string]$Path)
+    try { Assert-GenesisPublisherSignature -Path $Path -Publisher 'Microsoft Corporation' }
+    catch { throw 'L''exécutable Office ne possède pas une signature Microsoft valide.' }
 }
 
 function Install-GenesisOffice2024 {
@@ -1040,7 +1076,9 @@ function Install-GenesisBrowser {
     $uri = if ($browser -eq 'Chrome') { [uri]'https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi' } else { [uri]'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=fr' }
     $extension = if ($browser -eq 'Chrome') { '.msi' } else { '.exe' }
     $download = Save-GenesisDownload -Uri $uri -Path (Join-Path $softwareDirectory ("{0}-latest{1}" -f $browser.ToLowerInvariant(), $extension))
-    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'browser' -Percent 30 -Message ("{0} téléchargé ; SHA-256 {1}" -f $browser, $download.Sha256)
+    $publisher = if ($browser -eq 'Chrome') { 'Google LLC' } else { 'Mozilla Corporation' }
+    Assert-GenesisPublisherSignature -Path $download.Path -Publisher $publisher
+    Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'browser' -Percent 30 -Message ("{0} téléchargé et signé par {1} ; SHA-256 {2}" -f $browser, $publisher, $download.Sha256)
     $result = if ($browser -eq 'Chrome') {
         Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /qn /norestart' -f $download.Path) -TimeoutSeconds 1800
     }
@@ -1081,6 +1119,8 @@ function Install-GenesisWingetPackage {
     param([Parameter(Mandatory)][string]$Id)
     if ($null -eq (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ Status = 'NeedsAttention'; Message = 'winget.exe est indisponible ; installer le logiciel depuis sa source officielle.' } }
     $result = Invoke-GenesisNativeCommand -FilePath 'winget.exe' -Arguments ('install --id {0} --exact --silent --accept-package-agreements --accept-source-agreements' -f $Id) -TimeoutSeconds 1800
+    # 0x8A150061 : paquet déjà installé ; 0x8A15002B : aucune mise à jour applicable.
+    if ($result.ExitCode -in @(-1978335135, -1978335189)) { return [pscustomobject]@{ Status = 'Completed'; Message = "Paquet $Id déjà installé." } }
     if ($result.ExitCode -notin @(0, 3010, 1641)) { throw "winget a renvoyé le code $($result.ExitCode) pour $Id." }
     [pscustomobject]@{ Status = 'Completed'; Message = "Paquet $Id installé." }
 }
@@ -1088,7 +1128,8 @@ function Install-GenesisWingetPackage {
 function Get-GenesisPdfReaderPath {
     param([ValidateSet('Acrobat', 'SumatraPDF', 'PDFCraft')][string]$Reader)
     switch ($Reader) {
-        'Acrobat' { return Get-GenesisExecutablePath -Names @('AcroRd32.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe'), (Join-Path ${env:ProgramFiles(x86)} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe')) }
+        # Le paquet 64 bits installe le lecteur unifié Acrobat.exe ; AcroRd32.exe reste l'ancien lecteur 32 bits.
+        'Acrobat' { return Get-GenesisExecutablePath -Names @('Acrobat.exe', 'AcroRd32.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'Adobe\Acrobat DC\Acrobat\Acrobat.exe'), (Join-Path ${env:ProgramFiles} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe'), (Join-Path ${env:ProgramFiles(x86)} 'Adobe\Acrobat Reader DC\Reader\AcroRd32.exe')) }
         'SumatraPDF' { return Get-GenesisExecutablePath -Names @('SumatraPDF.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'SumatraPDF\SumatraPDF.exe'), (Join-Path ${env:ProgramFiles(x86)} 'SumatraPDF\SumatraPDF.exe'), (Join-Path $env:LOCALAPPDATA 'SumatraPDF\SumatraPDF.exe')) }
         'PDFCraft' {
             $known = Get-GenesisExecutablePath -Names @('pdfcraft.exe', 'PDFCraft.exe') -Candidates @((Join-Path ${env:ProgramFiles} 'PDFCraft\pdfcraft.exe'), (Join-Path ${env:ProgramFiles(x86)} 'PDFCraft\pdfcraft.exe'))
@@ -1124,6 +1165,7 @@ function Install-GenesisPdfReader {
     }
     if ($reader -eq 'PDFCraft') {
         $download = Save-GenesisDownload -Uri $uri -Path (Join-Path $softwareDirectory $fileName) -ExpectedSha256 $sha256
+        Assert-GenesisPublisherSignature -Path $download.Path -Publisher 'Learning Machines Inc'
         $install = Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /qn /norestart INSTALLDESKTOPSHORTCUT=0' -f $download.Path) -TimeoutSeconds 1800
         if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "Installation PDFCraft impossible (code $($install.ExitCode))." }
     }
@@ -1249,6 +1291,7 @@ function Install-GenesisNetBird {
     if ([string]::IsNullOrWhiteSpace($executable)) {
         $installerPath = Join-Path $softwareDirectory 'netbird-latest.msi'
         $download = Save-GenesisDownload -Uri ([uri]$script:GenesisNetBirdMsiUri) -Path $installerPath
+        Assert-GenesisPublisherSignature -Path $download.Path -Publisher 'NetBird GmbH'
         Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'netbird' -Percent 30 -Message 'Installateur NetBird téléchargé ; installation silencieuse'
         $install = Invoke-GenesisNativeCommand -FilePath 'msiexec.exe' -Arguments ('/i "{0}" /quiet /norestart' -f $download.Path) -TimeoutSeconds 1800
         if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "Installation NetBird impossible (code $($install.ExitCode))." }
@@ -1628,7 +1671,8 @@ function Invoke-GenesisCustomization {
     param([string]$StepId, [string]$RunDirectory, [object]$Choices)
     if ($env:OS -ne 'Windows_NT') { throw 'Personnalisation disponible sur Windows uniquement.' }
     switch ($StepId) {
-        'windows-update' { return Invoke-GenesisWindowsUpdate -RunDirectory $RunDirectory }
+        'windows-update' { return Invoke-GenesisWindowsUpdateStep -RunDirectory $RunDirectory }
+        'windows-feature-update' { return Invoke-GenesisWindowsUpdateStep -RunDirectory $RunDirectory -Scope Feature }
         'time-sync' { return Set-GenesisWindowsTime -RunDirectory $RunDirectory }
         'power-ac' { return Set-GenesisPowerAc -RunDirectory $RunDirectory }
         'local-user' { return New-GenesisLocalUser -RunDirectory $RunDirectory }
