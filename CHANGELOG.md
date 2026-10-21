@@ -1,6 +1,6 @@
 # Historique des versions
 
-## Non publié
+## 1.1.0
 
 - Nouvelle opération **Capture FOG** (`fog-capture`), décochée par défaut :
   nettoyage, Sysprep, programmation de la capture par l'API FOG et
@@ -22,6 +22,12 @@
   gauche et retrait des épingles Edge et Microsoft Store.
 - Nouveau choix de menu **Désinstaller Genesis** : supprime toutes les traces de
   Genesis sur le poste après confirmation, sans défaire les personnalisations.
+
+### À savoir pour la mise à jour
+
+Les sauvegardes et les reprises sont liées à la version de Genesis : une
+préparation faite avec la 1.0.0 ne peut pas être reprise ni restaurée avec la
+1.1.0. Terminer ou restaurer les préparations en cours avant de mettre à jour.
 
 ## 1.0.0
 
