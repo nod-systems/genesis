@@ -3790,7 +3790,7 @@ function Invoke-GenesisFogApi {
         $request.Body = $Body | ConvertTo-Json -Depth 6 -Compress
         $request.ContentType = 'application/json'
     }
-    try { return Invoke-RestMethod @request }
+    try { $response = Invoke-RestMethod @request }
     catch {
         $status = 0
         try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = 0 }
@@ -3800,6 +3800,11 @@ function Invoke-GenesisFogApi {
         $reason = ([string]$_.Exception.Message -replace '[\r\n\t]+', ' ').Trim()
         throw ('Réponse FOG refusée ou serveur injoignable ({0} {1}) : {2}' -f $Method, $Path, $reason)
     }
+    # API désactivée ou clés inconnues : FOG redirige vers sa page de connexion au lieu de répondre en JSON.
+    if ($response -is [string] -and $response -match '(?i)<html|<!doctype') {
+        throw 'FOG répond par sa page web au lieu de l''API : cocher FOG_API_ENABLED (FOG Configuration > FOG Settings > API System) et « API Enabled » de l''utilisateur (User Management > API Settings), enregistrer, puis vérifier les deux clés.'
+    }
+    return $response
 }
 
 function Get-GenesisFogItem {

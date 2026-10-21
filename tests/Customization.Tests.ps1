@@ -938,6 +938,14 @@ Describe 'Capture FOG' {
         }
     }
 
+    It 'explique quand FOG renvoie sa page web au lieu de l''API' {
+        InModuleScope Genesis {
+            Mock Invoke-RestMethod { '<!DOCTYPE html><html><body>FOG Project</body></html>' }
+            $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' }
+            { Invoke-GenesisFogApi -Settings $settings -Path '/fog/image' } | Should -Throw '*FOG_API_ENABLED*'
+        }
+    }
+
     It 'réutilise un poste FOG connu par son adresse MAC et lui associe l''image' {
         InModuleScope Genesis {
             $settings = [pscustomobject]@{ Server = 'http://fog.example.test'; ApiToken = 'api-fictive'; UserToken = 'user-fictif'; ImageName = 'Win11-Ref' }
