@@ -173,9 +173,9 @@ démarrer sur le réseau.
 
 Limites à connaître :
 
-- Sysprep refuse un Windows mis à niveau sur place : ne pas combiner **Mise à
-  niveau Windows** et **Capture FOG** ; capturer un poste installé directement
-  dans la version voulue ;
+- Sysprep peut refuser un Windows mis à niveau sur place : Genesis le détecte,
+  ne programme rien et affiche le motif ; pour une image de production, capturer
+  un poste installé directement dans la version voulue ;
 - le démarrage réseau automatique exige un poste UEFI avec une entrée PXE
   visible ; sinon l'opération s'arrête avant toute modification ;
 - les réglages de session (barre des tâches, Explorateur, etc.) restent sur les

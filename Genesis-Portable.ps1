@@ -4020,9 +4020,8 @@ function Test-GenesisWindowsGeneralized {
 
 function Get-GenesisSysprepBlocker {
     param([Parameter(Mandatory)][string]$RunDirectory)
-    if (Test-Path -LiteralPath 'HKLM:\SYSTEM\Setup\Upgrade') {
-        return 'Windows a été mis à niveau sur place (ex. mise à niveau de version) : Sysprep refuse de généraliser ce poste. Capturer un poste installé directement dans la version voulue.'
-    }
+    # Une installation mise à niveau sur place n'est pas bloquée ici : Sysprep en juge lui-même,
+    # et son refus est détecté puis expliqué avant toute programmation de capture.
     if ((Test-GenesisUpdateRebootPending -RunDirectory $RunDirectory) -or
         (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')) {
         return 'Un redémarrage est en attente : redémarrer le poste puis reprendre Genesis avant la capture.'
@@ -4107,7 +4106,9 @@ function Invoke-GenesisSysprep {
     # /quit plutôt que /reboot : Genesis vérifie le résultat avant de programmer la capture.
     $result = Invoke-GenesisNativeCommand -FilePath $path -Arguments '/generalize /oobe /quit /quiet' -TimeoutSeconds 3600 -WorkingDirectory (Split-Path -Parent $path)
     if (-not (Test-GenesisWindowsGeneralized)) {
-        throw ('Sysprep n''a pas généralisé Windows (code {0}). {1}' -f $result.ExitCode, (Get-GenesisSysprepError -Since $started))
+        $detail = Get-GenesisSysprepError -Since $started
+        $hint = if ($detail -match '(?i)upgrade') { ' Windows a été mis à niveau sur place : capturer un poste installé directement dans la version voulue.' } else { '' }
+        throw ('Sysprep n''a pas généralisé Windows (code {0}). {1}{2}' -f $result.ExitCode, $detail, $hint)
     }
 }
 
