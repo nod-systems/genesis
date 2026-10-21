@@ -1,7 +1,5 @@
 ﻿Set-StrictMode -Version Latest
 $script:GenesisVersion = '1.0.0'
-$script:GenesisConsoleProgressStepId = $null
-$script:GenesisConsoleProgressLineLength = 0
 
 function Get-GenesisStepCatalog {
     [CmdletBinding()]
@@ -550,10 +548,6 @@ function Get-GenesisReverseCandidate {
 function Invoke-GenesisRunExecution {
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$RunDirectory)
     $path = Join-Path $RunDirectory 'state.json'
-    $script:GenesisConsoleProgressStepId = $null
-    $script:GenesisConsoleProgressLineLength = 0
-    $script:GenesisConsoleProgressRow = $null
-    $script:GenesisConsoleProgressSurfaceReady = $false
     Initialize-GenesisConsoleProgressSurface
     $State.Status = 'Running'
     $State.FinishedAt = $null
@@ -567,6 +561,7 @@ function Invoke-GenesisRunExecution {
         }
         $step.Status = 'Running'; $step.Percent = 10; $step.Message = 'Sauvegarde et exécution'
         $step.Attempts += 1; $step.ErrorType = $null
+        $script:GenesisStepErrors.Remove($step.Id)
         $step.StartedAt = [datetime]::UtcNow.ToString('o'); $step.FinishedAt = $null
         Write-GenesisJson -Path $path -Value $State
         Write-GenesisConsoleProgress -State $State
@@ -591,6 +586,10 @@ function Invoke-GenesisRunExecution {
         catch {
             $step.Status = 'Failed'; $step.Percent = 0
             $step.Message = 'Échec : consulter les prérequis puis reprendre ou restaurer.'
+            # Motif réel affiché à l'écran uniquement : il peut contenir des données privées et n'est jamais écrit dans state.json.
+            $reason = ([string]$_.Exception.Message -replace '[\r\n\t]+', ' ').Trim()
+            if ($reason.Length -gt 300) { $reason = $reason.Substring(0, 297) + '...' }
+            if (-not [string]::IsNullOrWhiteSpace($reason)) { $script:GenesisStepErrors[$step.Id] = 'Échec : ' + $reason }
             $step.FinishedAt = [datetime]::UtcNow.ToString('o')
             $step.ErrorType = $_.Exception.GetType().FullName
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }

@@ -343,6 +343,7 @@ Describe 'Preparation et reprise' {
         $failed.Status | Should -Be 'Failed'
         $failed.Steps[0].Status | Should -Be 'Failed'
         Get-Content (Join-Path $directory.FullName 'state.json') -Raw | Should -Not -Match 'contenu prive'
+        (Get-GenesisProgress -State $failed).Rows[0].Detail | Should -Match 'Panne fictive'
         Mock Get-GenesisInventory -ModuleName Genesis { [pscustomobject]@{ SchemaVersion = 1 } }
         $resumed = Resume-GenesisRun -RunId $directory.Name -DataRoot $script:DataRoot
         $resumed.Status | Should -Be 'Completed'
@@ -424,22 +425,25 @@ Describe 'Preparation et reprise' {
         (Get-Command Show-GenesisInterface -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
     }
 
-    It 'genere une barre console pour une etape active' {
+    It 'genere une ligne de tableau par action avec son pourcentage' {
         InModuleScope Genesis {
-            $line = ConvertTo-GenesisProgressBarLine -Label 'Initialisation' -Percent 50 -Width 20
-            $line | Should -Match 'Initialisation'
+            $row = [pscustomobject]@{ Id = 'time-sync'; State = 'En cours'; Status = 'Running'; Percent = 50; Undo = 'Non'; Detail = 'Une opération très longue qui doit rester sur une seule ligne du tableau' }
+            $line = ConvertTo-GenesisConsoleProgressRow -Row $row -DetailWidth 20
+            $line | Should -Match 'time-sync'
             $line | Should -Match '50%'
-            $line | Should -Match '█'
-            $longLine = ConvertTo-GenesisProgressBarLine -Label 'Une opération très longue qui doit rester dans la colonne du libellé' -Percent 10 -Width 20 -LabelWidth 30
-            $longLine.Length | Should -Be ($longLine.TrimEnd().Length)
+            $line | Should -Match 'En cours'
+            $line | Should -Not -Match '█'
+            $line | Should -Not -Match "`n"
+            $line.Length | Should -Be (Get-GenesisConsoleTableBorder -DetailWidth 20).Length
         }
     }
 
-    It 'ancre la progression sur une ligne fixe au lieu d ajouter une ligne par mise a jour' {
+    It 'met a jour les lignes du tableau en place au lieu d ecraser l action precedente' {
         $source = Get-Content (Join-Path $script:Repository 'modules/Genesis/Progress.ps1') -Raw
-        $source | Should -Match 'GenesisConsoleProgressRow'
+        $source | Should -Match 'RowTops'
         $source | Should -Match '\[Console\]::SetCursorPosition'
         $source | Should -Match 'Initialize-GenesisConsoleProgressSurface'
+        $source | Should -Not -Match 'ConvertTo-GenesisProgressBarLine'
     }
 
     It 'garde les colonnes du tableau d avancement alignees et replie le detail' {

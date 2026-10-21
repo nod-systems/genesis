@@ -43,8 +43,6 @@ $script:GenesisEmbeddedProfiles = @{
 
 Set-StrictMode -Version Latest
 $script:GenesisVersion = '1.0.0'
-$script:GenesisConsoleProgressStepId = $null
-$script:GenesisConsoleProgressLineLength = 0
 
 function Get-GenesisStepCatalog {
     [CmdletBinding()]
@@ -593,10 +591,6 @@ function Get-GenesisReverseCandidate {
 function Invoke-GenesisRunExecution {
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$RunDirectory)
     $path = Join-Path $RunDirectory 'state.json'
-    $script:GenesisConsoleProgressStepId = $null
-    $script:GenesisConsoleProgressLineLength = 0
-    $script:GenesisConsoleProgressRow = $null
-    $script:GenesisConsoleProgressSurfaceReady = $false
     Initialize-GenesisConsoleProgressSurface
     $State.Status = 'Running'
     $State.FinishedAt = $null
@@ -610,6 +604,7 @@ function Invoke-GenesisRunExecution {
         }
         $step.Status = 'Running'; $step.Percent = 10; $step.Message = 'Sauvegarde et exécution'
         $step.Attempts += 1; $step.ErrorType = $null
+        $script:GenesisStepErrors.Remove($step.Id)
         $step.StartedAt = [datetime]::UtcNow.ToString('o'); $step.FinishedAt = $null
         Write-GenesisJson -Path $path -Value $State
         Write-GenesisConsoleProgress -State $State
@@ -634,6 +629,10 @@ function Invoke-GenesisRunExecution {
         catch {
             $step.Status = 'Failed'; $step.Percent = 0
             $step.Message = 'Échec : consulter les prérequis puis reprendre ou restaurer.'
+            # Motif réel affiché à l'écran uniquement : il peut contenir des données privées et n'est jamais écrit dans state.json.
+            $reason = ([string]$_.Exception.Message -replace '[\r\n\t]+', ' ').Trim()
+            if ($reason.Length -gt 300) { $reason = $reason.Substring(0, 297) + '...' }
+            if (-not [string]::IsNullOrWhiteSpace($reason)) { $script:GenesisStepErrors[$step.Id] = 'Échec : ' + $reason }
             $step.FinishedAt = [datetime]::UtcNow.ToString('o')
             $step.ErrorType = $_.Exception.GetType().FullName
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }
@@ -2664,6 +2663,8 @@ function Get-GenesisOfficeInstallationStatus {
 function Get-GenesisOfficeDeploymentToolUri {
     $page = Invoke-WebRequest -Uri $script:GenesisOfficeDeploymentToolPage -UseBasicParsing -ErrorAction Stop
     foreach ($link in @($page.Links)) {
+        # Certaines balises <a> de la page n'ont pas de href : le mode strict refuse de lire une propriété absente.
+        if ($null -eq $link -or $link.PSObject.Properties.Name -notcontains 'href') { continue }
         $uri = $null
         if ([uri]::TryCreate([string]$link.href, [UriKind]::Absolute, [ref]$uri) -and
             $uri.Scheme -eq 'https' -and $uri.Host -eq 'download.microsoft.com' -and
@@ -3397,8 +3398,11 @@ function Undo-GenesisCustomization {
     }
     [pscustomobject]@{ Status = 'Restored'; Message = 'Valeurs et types initiaux restaurés et vérifiés.' }
 }
-$script:GenesisConsoleProgressRow = $null
+$script:GenesisConsoleTable = $null
+$script:GenesisConsoleTableDirty = $false
 $script:GenesisConsoleProgressSurfaceReady = $false
+# Motifs d'échec de la session en cours, gardés en mémoire seulement (jamais dans state.json).
+$script:GenesisStepErrors = @{}
 
 function Get-GenesisProgress {
     [CmdletBinding()]
@@ -3416,6 +3420,7 @@ function Get-GenesisProgress {
         if ($step.PSObject.Properties.Name -contains 'Percent') { $percent = [int]$step.Percent }
         elseif ($step.Status -eq 'Completed') { $percent = 100 }
         if ($step.PSObject.Properties.Name -contains 'Message') { $message = $step.Message }
+        if ($step.Status -eq 'Failed' -and $script:GenesisStepErrors.ContainsKey([string]$step.Id)) { $message = $script:GenesisStepErrors[[string]$step.Id] }
         if ($step.PSObject.Properties.Name -contains 'UndoStatus' -and $step.UndoStatus -eq 'Available') { $undo = 'Oui' }
         if ($step.Id -eq 'time-sync' -and $undo -eq 'Oui') { $undo = 'Configuration' }
         [pscustomobject]@{ Id = $step.Id; Name = $definition.Name; Context = $definition.Context; State = $labels[$step.Status]; Status = $step.Status; Percent = $percent; Detail = $message; Undo = $undo }
@@ -3456,19 +3461,67 @@ function ConvertTo-GenesisConsoleLabel {
     return $value
 }
 
-function ConvertTo-GenesisProgressBarLine {
+$script:GenesisConsoleTableColumns = @(14, 12, 6, 8)
+
+function Get-GenesisConsoleTableDetailWidth {
+    param([int]$ConsoleWidth = (Get-GenesisConsoleWidth))
+    $fixed = ($script:GenesisConsoleTableColumns | Measure-Object -Sum).Sum + (3 * ($script:GenesisConsoleTableColumns.Count + 1)) + 1
+    return [int][math]::Max(10, [math]::Min(60, $ConsoleWidth - $fixed - 1))
+}
+
+function Get-GenesisConsoleTableBorder {
+    param([Parameter(Mandatory)][int]$DetailWidth)
+    $widths = @($script:GenesisConsoleTableColumns) + $DetailWidth
+    return '+' + (($widths | ForEach-Object { '-' * ($_ + 2) }) -join '+') + '+'
+}
+
+function ConvertTo-GenesisConsoleTableRow {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Label,
-        [ValidateRange(0, 100)][int]$Percent,
-        [ValidateRange(10, 120)][int]$Width = 24,
-        [ValidateRange(12, 80)][int]$LabelWidth = 38
-    )
-    $filled = [math]::Floor($Width * $Percent / 100)
-    $empty = $Width - $filled
-    $bar = (('█' * $filled) -join '') + (('░' * $empty) -join '')
-    $safeLabel = ConvertTo-GenesisConsoleLabel -Text $Label -Width $LabelWidth
-    return ("{0,-$LabelWidth} |{1}| {2,3}%" -f $safeLabel, $bar, $Percent)
+    param([Parameter(Mandatory)][string[]]$Cells, [Parameter(Mandatory)][int]$DetailWidth)
+    $widths = @($script:GenesisConsoleTableColumns) + $DetailWidth
+    $parts = for ($index = 0; $index -lt $widths.Count; $index++) {
+        $value = if ($index -lt $Cells.Count) { [string]$Cells[$index] } else { '' }
+        ' ' + (ConvertTo-GenesisConsoleLabel -Text $value -Width $widths[$index]).PadRight($widths[$index]) + ' '
+    }
+    return '|' + ($parts -join '|') + '|'
+}
+
+function ConvertTo-GenesisConsoleProgressRow {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][int]$DetailWidth)
+    $state = if ($null -eq $Row.State) { [string]$Row.Status } else { [string]$Row.State }
+    return ConvertTo-GenesisConsoleTableRow -Cells @($Row.Id, $state, ('{0}%' -f $Row.Percent), $Row.Undo, $Row.Detail) -DetailWidth $DetailWidth
+}
+
+function Get-GenesisConsoleProgressSummary {
+    param([Parameter(Mandatory)]$View)
+    return ('Avancement : {0,3}% ({1}/{2})' -f $View.Percent, $View.Completed, $View.Total)
+}
+
+function Get-GenesisConsoleRowColor {
+    param([string]$Status)
+    switch ($Status) {
+        'Running' { return [ConsoleColor]::Yellow }
+        'Restoring' { return [ConsoleColor]::Yellow }
+        'Completed' { return [ConsoleColor]::Green }
+        'Restored' { return [ConsoleColor]::Green }
+        'Failed' { return [ConsoleColor]::Red }
+        'RestoreConflict' { return [ConsoleColor]::Red }
+        'NeedsAttention' { return [ConsoleColor]::DarkYellow }
+        'AwaitingSession' { return [ConsoleColor]::DarkYellow }
+        default { return [ConsoleColor]::Gray }
+    }
+}
+
+function Write-GenesisConsoleLine {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Ligne colorée du tableau de progression console.')]
+    param([AllowEmptyString()][string]$Text, [ConsoleColor]$Color = [ConsoleColor]::Gray, [int]$PadTo = 0)
+    $previous = [Console]::ForegroundColor
+    try {
+        [Console]::ForegroundColor = $Color
+        [Console]::Write($Text.PadRight($PadTo))
+    }
+    finally { [Console]::ForegroundColor = $previous }
 }
 
 function Test-GenesisInteractiveConsole {
@@ -3477,23 +3530,10 @@ function Test-GenesisInteractiveConsole {
 }
 
 function Initialize-GenesisConsoleProgressSurface {
-    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Initialisation de la surface de progression console du technicien.')]
     param()
-    if ($script:GenesisConsoleProgressSurfaceReady) { return }
-    if (-not (Test-GenesisInteractiveConsole)) { return }
-    try {
-        Clear-Host
-        Write-GenesisBanner
-        Write-Host 'Exécution Genesis — progression des tâches' -ForegroundColor Cyan
-        $script:GenesisConsoleProgressRow = [Console]::CursorTop
-        [Console]::WriteLine()
-        $script:GenesisConsoleProgressSurfaceReady = $true
-    }
-    catch {
-        $script:GenesisConsoleProgressRow = $null
-        $script:GenesisConsoleProgressSurfaceReady = $false
-        Write-Verbose ('Surface de progression indisponible : ' + $_.Exception.Message)
-    }
+    $script:GenesisConsoleTable = $null
+    $script:GenesisConsoleTableDirty = $false
+    $script:GenesisConsoleProgressSurfaceReady = Test-GenesisInteractiveConsole
 }
 
 function Get-GenesisConsoleCursor {
@@ -3514,61 +3554,121 @@ function Set-GenesisConsoleCursor {
     catch { return $false }
 }
 
-function Complete-GenesisConsoleProgressLine {
-    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Nettoyage de la ligne de progression console du technicien.')]
-    param()
+function Write-GenesisConsoleProgressTable {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Tableau de progression console du technicien.')]
+    param([Parameter(Mandatory)]$View)
+    Clear-Host
+    Write-GenesisBanner
+    Write-Host 'Exécution Genesis — progression des tâches' -ForegroundColor Cyan
+    $detailWidth = Get-GenesisConsoleTableDetailWidth
+    $border = Get-GenesisConsoleTableBorder -DetailWidth $detailWidth
+    $lines = @{}
+    [Console]::WriteLine($border)
+    [Console]::WriteLine((ConvertTo-GenesisConsoleTableRow -Cells @('ID', 'État', '%', 'Reverse', 'Détail') -DetailWidth $detailWidth))
+    [Console]::WriteLine($border)
+    foreach ($row in @($View.Rows)) {
+        $line = ConvertTo-GenesisConsoleProgressRow -Row $row -DetailWidth $detailWidth
+        Write-GenesisConsoleLine -Text $line -Color (Get-GenesisConsoleRowColor -Status $row.Status)
+        [Console]::WriteLine()
+        $lines[$row.Id] = $line
+    }
+    [Console]::WriteLine($border)
+    $summary = Get-GenesisConsoleProgressSummary -View $View
+    Write-GenesisConsoleLine -Text $summary -Color Cyan
+    [Console]::WriteLine()
+    [Console]::WriteLine()
+    # Positions calculées depuis le bas : elles restent justes même si l'écran a défilé pendant le dessin.
+    $end = [Console]::CursorTop
+    $summaryTop = $end - 2
+    $firstRowTop = $summaryTop - 1 - @($View.Rows).Count
+    $rowTops = @{}
+    $index = 0
+    foreach ($row in @($View.Rows)) { $rowTops[$row.Id] = $firstRowTop + $index; $index++ }
+    $script:GenesisConsoleTable = [pscustomobject]@{
+        Ids = (@($View.Rows | ForEach-Object { $_.Id }) -join ',')
+        DetailWidth = $detailWidth
+        RowTops = $rowTops
+        Lines = $lines
+        SummaryTop = $summaryTop
+        Summary = $summary
+        End = $end
+    }
+    $script:GenesisConsoleTableDirty = $false
+}
+
+function Update-GenesisConsoleProgressTable {
+    param([Parameter(Mandatory)]$View)
+    $table = $script:GenesisConsoleTable
     $cursor = Get-GenesisConsoleCursor
-    if ($null -ne $cursor -and $null -ne $script:GenesisConsoleProgressRow -and $script:GenesisConsoleProgressLineLength -gt 0) {
-        $row = [int]$script:GenesisConsoleProgressRow
-        if (Set-GenesisConsoleCursor -Left 0 -Top $row) {
-            [Console]::Write((' ' * $script:GenesisConsoleProgressLineLength))
-            $restoreRow = [int]$cursor.Top
-            if ($restoreRow -le $row) { $restoreRow = $row + 1 }
-            Set-GenesisConsoleCursor -Left 0 -Top $restoreRow | Out-Null
-        }
+    if ($null -eq $cursor) { return $false }
+    foreach ($row in @($View.Rows)) {
+        $line = ConvertTo-GenesisConsoleProgressRow -Row $row -DetailWidth $table.DetailWidth
+        if ($table.Lines[$row.Id] -ceq $line) { continue }
+        if (-not (Set-GenesisConsoleCursor -Left 0 -Top $table.RowTops[$row.Id])) { return $false }
+        Write-GenesisConsoleLine -Text $line -Color (Get-GenesisConsoleRowColor -Status $row.Status)
+        $table.Lines[$row.Id] = $line
     }
-    elseif ($script:GenesisConsoleProgressLineLength -gt 0) {
-        [Console]::Write("`r" + (' ' * $script:GenesisConsoleProgressLineLength) + "`r")
+    $summary = Get-GenesisConsoleProgressSummary -View $View
+    if ($summary -cne $table.Summary) {
+        if (-not (Set-GenesisConsoleCursor -Left 0 -Top $table.SummaryTop)) { return $false }
+        Write-GenesisConsoleLine -Text $summary -Color Cyan -PadTo $table.Summary.Length
+        $table.Summary = $summary
     }
-    $script:GenesisConsoleProgressStepId = $null
-    $script:GenesisConsoleProgressLineLength = 0
+    $restoreTop = [math]::Max([int]$cursor.Top, [int]$table.End)
+    Set-GenesisConsoleCursor -Left 0 -Top $restoreTop | Out-Null
+    return $true
+}
+
+function Write-GenesisConsoleProgressAppend {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Journal de progression console du technicien.')]
+    param([Parameter(Mandatory)]$View)
+    # Console non interactive : une ligne par changement d'état, sans réécriture.
+    if ($null -eq $script:GenesisConsoleTable) {
+        $script:GenesisConsoleTable = [pscustomobject]@{ DetailWidth = (Get-GenesisConsoleTableDetailWidth -ConsoleWidth 120); States = @{} }
+        Write-Host (ConvertTo-GenesisConsoleTableRow -Cells @('ID', 'État', '%', 'Reverse', 'Détail') -DetailWidth $script:GenesisConsoleTable.DetailWidth)
+    }
+    foreach ($row in @($View.Rows)) {
+        if ($script:GenesisConsoleTable.States[$row.Id] -ceq $row.Status) { continue }
+        $script:GenesisConsoleTable.States[$row.Id] = $row.Status
+        if ($row.Status -eq 'Pending') { continue }
+        Write-Host (ConvertTo-GenesisConsoleProgressRow -Row $row -DetailWidth $script:GenesisConsoleTable.DetailWidth)
+    }
+}
+
+function Complete-GenesisConsoleProgressLine {
+    param()
+    # Appelée avant une saisie : la saisie s'affiche sous le tableau, qui sera redessiné ensuite.
+    if ($null -eq $script:GenesisConsoleTable -or -not $script:GenesisConsoleProgressSurfaceReady) { return }
+    $cursor = Get-GenesisConsoleCursor
+    if ($null -ne $cursor -and $cursor.Top -lt $script:GenesisConsoleTable.End) {
+        Set-GenesisConsoleCursor -Left 0 -Top $script:GenesisConsoleTable.End | Out-Null
+    }
+    $script:GenesisConsoleTableDirty = $true
 }
 
 function Write-GenesisConsoleProgress {
-    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Barre de progression console du technicien.')]
     param([Parameter(Mandatory)]$State)
     $view = Get-GenesisProgress -State $State
-    $active = @($view.Rows | Where-Object { $_.Status -eq 'Running' } | Select-Object -First 1)
-    if ($active.Count -eq 0) {
-        Complete-GenesisConsoleProgressLine
+    if (-not $script:GenesisConsoleProgressSurfaceReady) {
+        Write-GenesisConsoleProgressAppend -View $view
         return
     }
-    if ($script:GenesisConsoleProgressStepId -ne $active[0].Id) {
-        Complete-GenesisConsoleProgressLine
-        $script:GenesisConsoleProgressStepId = $active[0].Id
+    try {
+        $ids = @($view.Rows | ForEach-Object { $_.Id }) -join ','
+        $table = $script:GenesisConsoleTable
+        if ($null -eq $table -or $script:GenesisConsoleTableDirty -or $table.Ids -cne $ids -or $table.DetailWidth -ne (Get-GenesisConsoleTableDetailWidth)) {
+            Write-GenesisConsoleProgressTable -View $view
+        }
+        elseif (-not (Update-GenesisConsoleProgressTable -View $view)) {
+            Write-GenesisConsoleProgressTable -View $view
+        }
     }
-    $consoleWidth = Get-GenesisConsoleWidth
-    $labelWidth = 38
-    $barWidth = [math]::Max(16, [math]::Min(32, $consoleWidth - $labelWidth - 10))
-    $line = ConvertTo-GenesisProgressBarLine -Label $active[0].Name -Percent $active[0].Percent -Width $barWidth -LabelWidth $labelWidth
-    $oldLength = [int]$script:GenesisConsoleProgressLineLength
-    $cursor = Get-GenesisConsoleCursor
-    $targetRow = $script:GenesisConsoleProgressRow
-    if ($null -ne $cursor -and $null -eq $targetRow) { $targetRow = [int]$cursor.Top; $script:GenesisConsoleProgressRow = $targetRow }
-    if ($null -ne $cursor -and $null -ne $targetRow -and (Set-GenesisConsoleCursor -Left 0 -Top $targetRow)) {
-        $clearLength = [math]::Max($oldLength, $line.Length)
-        [Console]::Write((' ' * $clearLength))
-        Set-GenesisConsoleCursor -Left 0 -Top $targetRow | Out-Null
-        [Console]::Write($line)
-        $restoreRow = [int]$cursor.Top
-        if ($restoreRow -le $targetRow) { $restoreRow = $targetRow + 1 }
-        Set-GenesisConsoleCursor -Left 0 -Top $restoreRow | Out-Null
+    catch {
+        Write-Verbose ('Tableau de progression indisponible : ' + $_.Exception.Message)
+        $script:GenesisConsoleProgressSurfaceReady = $false
+        $script:GenesisConsoleTable = $null
+        Write-GenesisConsoleProgressAppend -View $view
     }
-    else {
-        if ($oldLength -gt 0) { [Console]::Write("`r" + (' ' * $oldLength) + "`r") }
-        [Console]::Write($line)
-    }
-    $script:GenesisConsoleProgressLineLength = $line.Length
 }
 
 function Set-GenesisStepProgress {

@@ -1001,6 +1001,8 @@ function Get-GenesisOfficeInstallationStatus {
 function Get-GenesisOfficeDeploymentToolUri {
     $page = Invoke-WebRequest -Uri $script:GenesisOfficeDeploymentToolPage -UseBasicParsing -ErrorAction Stop
     foreach ($link in @($page.Links)) {
+        # Certaines balises <a> de la page n'ont pas de href : le mode strict refuse de lire une propriété absente.
+        if ($null -eq $link -or $link.PSObject.Properties.Name -notcontains 'href') { continue }
         $uri = $null
         if ([uri]::TryCreate([string]$link.href, [UriKind]::Absolute, [ref]$uri) -and
             $uri.Scheme -eq 'https' -and $uri.Host -eq 'download.microsoft.com' -and
