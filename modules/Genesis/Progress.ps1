@@ -235,6 +235,12 @@ function Write-GenesisConsoleProgressAppend {
     }
 }
 
+function Request-GenesisConsoleRedraw {
+    param()
+    # Fin d'une action : le tableau sera redessiné en entier, ce qui efface tout affichage parasite.
+    if ($null -ne $script:GenesisConsoleTable) { $script:GenesisConsoleTableDirty = $true }
+}
+
 function Complete-GenesisConsoleProgressLine {
     param()
     # Appelée avant une saisie : la saisie s'affiche sous le tableau, qui sera redessiné ensuite.

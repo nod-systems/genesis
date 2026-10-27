@@ -473,6 +473,21 @@ Describe 'Preparation et reprise' {
         }
     }
 
+    It 'coupe les barres de progression et redessine le tableau apres chaque action' {
+        $source = Get-Content (Join-Path $script:Repository 'modules/Genesis/Genesis.psm1') -Raw
+        $body = [regex]::Match($source, '(?s)function Invoke-GenesisRunExecution \{.*?\n\}').Value
+        $body | Should -Match "\`$ProgressPreference = 'SilentlyContinue'"
+        ([regex]::Matches($body, 'Request-GenesisConsoleRedraw')).Count | Should -Be 2
+        InModuleScope Genesis {
+            $script:GenesisConsoleTable = [pscustomobject]@{ Ids = 'a' }
+            $script:GenesisConsoleTableDirty = $false
+            Request-GenesisConsoleRedraw
+            $script:GenesisConsoleTableDirty | Should -BeTrue
+            $script:GenesisConsoleTable = $null
+            $script:GenesisConsoleTableDirty = $false
+        }
+    }
+
     It 'met a jour les lignes du tableau en place au lieu d ecraser l action precedente' {
         $source = Get-Content (Join-Path $script:Repository 'modules/Genesis/Progress.ps1') -Raw
         $source | Should -Match 'RowTops'

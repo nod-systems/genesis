@@ -605,6 +605,9 @@ function Get-GenesisReverseCandidate {
 function Invoke-GenesisRunExecution {
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$RunDirectory)
     $path = Join-Path $RunDirectory 'state.json'
+    # Les barres de progression des cmdlets (Appx, téléchargements…) se superposent au tableau :
+    # elles sont coupées pendant l'exécution (variable locale, rétablie à la sortie de la fonction).
+    $ProgressPreference = 'SilentlyContinue'
     Initialize-GenesisConsoleProgressSurface
     $State.Status = 'Running'
     $State.FinishedAt = $null
@@ -657,6 +660,7 @@ function Invoke-GenesisRunExecution {
             $step.FinishedAt = [datetime]::UtcNow.ToString('o')
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }
             Write-GenesisJson -Path $path -Value $State
+            Request-GenesisConsoleRedraw
             Write-GenesisConsoleProgress -State $State
             Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_finished' -StepId $step.Id
         }
@@ -672,6 +676,7 @@ function Invoke-GenesisRunExecution {
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }
             $State.Status = 'Failed'
             Write-GenesisJson -Path $path -Value $State
+            Request-GenesisConsoleRedraw
             Write-GenesisConsoleProgress -State $State
             Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_failed' -StepId $step.Id -ErrorType $step.ErrorType
             if ($step.Id -eq 'inventory') { throw }
@@ -4477,6 +4482,12 @@ function Write-GenesisConsoleProgressAppend {
         if ($row.Status -eq 'Pending') { continue }
         Write-Host (ConvertTo-GenesisConsoleProgressRow -Row $row -DetailWidth $script:GenesisConsoleTable.DetailWidth)
     }
+}
+
+function Request-GenesisConsoleRedraw {
+    param()
+    # Fin d'une action : le tableau sera redessiné en entier, ce qui efface tout affichage parasite.
+    if ($null -ne $script:GenesisConsoleTable) { $script:GenesisConsoleTableDirty = $true }
 }
 
 function Complete-GenesisConsoleProgressLine {

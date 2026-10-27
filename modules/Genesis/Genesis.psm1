@@ -562,6 +562,9 @@ function Get-GenesisReverseCandidate {
 function Invoke-GenesisRunExecution {
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$RunDirectory)
     $path = Join-Path $RunDirectory 'state.json'
+    # Les barres de progression des cmdlets (Appx, téléchargements…) se superposent au tableau :
+    # elles sont coupées pendant l'exécution (variable locale, rétablie à la sortie de la fonction).
+    $ProgressPreference = 'SilentlyContinue'
     Initialize-GenesisConsoleProgressSurface
     $State.Status = 'Running'
     $State.FinishedAt = $null
@@ -614,6 +617,7 @@ function Invoke-GenesisRunExecution {
             $step.FinishedAt = [datetime]::UtcNow.ToString('o')
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }
             Write-GenesisJson -Path $path -Value $State
+            Request-GenesisConsoleRedraw
             Write-GenesisConsoleProgress -State $State
             Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_finished' -StepId $step.Id
         }
@@ -629,6 +633,7 @@ function Invoke-GenesisRunExecution {
             if (Test-GenesisUndoAvailable -StepId $step.Id -RunDirectory $RunDirectory) { $step.UndoStatus = 'Available' }
             $State.Status = 'Failed'
             Write-GenesisJson -Path $path -Value $State
+            Request-GenesisConsoleRedraw
             Write-GenesisConsoleProgress -State $State
             Add-GenesisEvent -RunDirectory $RunDirectory -EventName 'step_failed' -StepId $step.Id -ErrorType $step.ErrorType
             if ($step.Id -eq 'inventory') { throw }
