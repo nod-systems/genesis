@@ -740,6 +740,7 @@ Describe 'Source publique Office LTSC' {
                 [IO.File]::WriteAllBytes($Path, [byte[]](1, 2, 3))
                 [pscustomobject]@{ Uri = 'https://download.microsoft.com/download/example/officedeploymenttool_example.exe'; Path = $Path; Sha256 = 'fictitious' }
             }
+            Mock Get-GenesisLegacyOffice { @() }
             Mock Assert-GenesisMicrosoftSignature {}
             Mock Set-GenesisStepProgress {}
             Mock Invoke-GenesisNativeCommand {
@@ -760,6 +761,12 @@ Describe 'Source publique Office LTSC' {
             $config | Should -Not -Match 'PIDKEY|RemoveMSI|SourcePath|AUTOACTIVATE'
             Should -Invoke Assert-GenesisMicrosoftSignature -Exactly -Times 2
             Should -Invoke Invoke-GenesisNativeCommand -Exactly -Times 2
+            # Un Office MSI ancien est retiré par ODT pendant l'installation.
+            $script:OfficeInstalled = $false
+            Mock Get-GenesisLegacyOffice { @([pscustomobject]@{ Kind = 'Msi'; Name = 'Microsoft Office Professionnel Plus 2010'; UninstallString = 'MsiExec.exe /X{90140000-0011-0000-0000-0000000FF1CE}' }) }
+            $result = Install-GenesisOffice2024 -RunDirectory $Root -LegacyChoice 'RemoveLegacy'
+            $result.Status | Should -Be 'Completed'
+            Get-Content -LiteralPath (Join-Path (Join-Path $Root 'software') 'office-2024.xml') -Raw | Should -Match '<RemoveMSI />'
         }
     }
 }

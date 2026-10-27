@@ -1120,6 +1120,7 @@ function Assert-GenesisChoice {
     $allowed = @{
         browser = @('Chrome', 'Firefox')
         'pdf-reader' = @('Acrobat', 'SumatraPDF', 'PDFCraft')
+        'office-2024' = @('RemoveLegacy', 'KeepLegacy')
     }
     $result = [ordered]@{}
     if ($null -eq $Choices) { return $result }
@@ -1338,6 +1339,16 @@ function Show-GenesisTaskChecklist {
             [pscustomobject]@{ Id = 'Acrobat'; Label = 'Adobe Acrobat Reader' }
         )
     }
+    # Choix proposé seulement si un ancien Office est présent : il doit être supprimé avant Office 2024.
+    # @(...) autour du if : un seul résultat resterait sinon un objet simple, sans Count en mode strict.
+    $legacyOffice = @(if (@($steps | ForEach-Object { $_.Id }) -contains 'office-2024') { Get-GenesisLegacyOffice })
+    if ($legacyOffice.Count -gt 0) {
+        $legacyLabel = Get-GenesisLegacyOfficeLabel -Items $legacyOffice
+        $radioDefinitions['office-2024'] = @(
+            [pscustomobject]@{ Id = 'RemoveLegacy'; Label = ('Supprimer {0} puis installer 2024' -f $legacyLabel) }
+            [pscustomobject]@{ Id = 'KeepLegacy'; Label = 'Conserver l''ancien Office (2024 non installé)' }
+        )
+    }
     $rows = @()
     foreach ($step in $steps) {
         $rows += ,([pscustomobject]@{ Kind = 'Step'; Id = $step.Id; ParentId = ''; Name = $step.Name })
@@ -1352,6 +1363,7 @@ function Show-GenesisTaskChecklist {
     $selectedChoices = [ordered]@{}
     if ($checked.ContainsKey('browser')) { $selectedChoices.browser = 'Chrome' }
     if ($checked.ContainsKey('pdf-reader')) { $selectedChoices.'pdf-reader' = 'Acrobat' }
+    if ($radioDefinitions.ContainsKey('office-2024') -and $checked['office-2024']) { $selectedChoices.'office-2024' = 'RemoveLegacy' }
     $cursor = 0
     $cursorWasVisible = $true
     try {
@@ -1361,7 +1373,7 @@ function Show-GenesisTaskChecklist {
             Write-GenesisBanner
             Write-Host 'Sélection des opérations à exécuter' -ForegroundColor Cyan
             Write-Host 'Flèches haut/bas : déplacer   Espace : cocher/décocher   Entrée : lancer   Échap : annuler' -ForegroundColor DarkGray
-            Write-Host 'Les choix indentés sont exclusifs : un seul navigateur et un seul lecteur PDF.' -ForegroundColor DarkGray
+            Write-Host 'Les choix indentés sont exclusifs : un seul choix par opération.' -ForegroundColor DarkGray
             if ($completion.ContainsKey('windows-update') -and -not [string]::IsNullOrWhiteSpace([string]$completion['windows-update'].CurrentVersion)) {
                 $updateStatus = $completion['windows-update']
                 Write-Host ('Windows actuel  : ' + $updateStatus.CurrentVersion) -ForegroundColor Cyan
@@ -1391,6 +1403,7 @@ function Show-GenesisTaskChecklist {
             $choiceSummary = @()
             if ($selectedChoices.Contains('browser')) { $choiceSummary += 'Navigateur=' + $selectedChoices.browser }
             if ($selectedChoices.Contains('pdf-reader')) { $choiceSummary += 'PDF=' + $selectedChoices.'pdf-reader' }
+            if ($selectedChoices.Contains('office-2024')) { $choiceSummary += $(if ($selectedChoices.'office-2024' -eq 'RemoveLegacy') { 'Ancien Office=supprimé' } else { 'Ancien Office=conservé' }) }
             $summary = if ($choiceSummary.Count -gt 0) { ' | ' + ($choiceSummary -join ' | ') } else { '' }
             Write-Host ("{0}/{1} opérations sélectionnées{2}" -f @($checked.Values | Where-Object { $_ }).Count, $steps.Count, $summary) -ForegroundColor Cyan
             $key = [Console]::ReadKey($true)
@@ -3038,10 +3051,115 @@ function Assert-GenesisMicrosoftSignature {
     catch { throw 'L''exécutable Office ne possède pas une signature Microsoft valide.' }
 }
 
+function Get-GenesisUninstallEntry {
+    foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+            $properties = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+            if ($null -eq $properties) { continue }
+            $names = @($properties.PSObject.Properties.Name)
+            [pscustomobject]@{
+                Key = [string]$key.PSChildName
+                Name = if ($names -contains 'DisplayName') { [string]$properties.DisplayName } else { '' }
+                Version = if ($names -contains 'DisplayVersion') { [string]$properties.DisplayVersion } else { '' }
+                UninstallString = if ($names -contains 'UninstallString') { [string]$properties.UninstallString } else { '' }
+                SystemComponent = ($names -contains 'SystemComponent' -and [int]$properties.SystemComponent -eq 1)
+            }
+        }
+    }
+}
+
+function Get-GenesisLegacyOffice {
+    # Anciens Office incompatibles avec Office 2024 : Starter 2010 virtualisé, MSI 2007-2016, Démarrer en un clic récent.
+    $items = @()
+    $entries = @(Get-GenesisUninstallEntry | Where-Object { -not $_.SystemComponent -and -not [string]::IsNullOrWhiteSpace($_.Name) })
+    $starter = @($entries | Where-Object { $_.Key -eq 'Office14.Click2Run' -or $_.UninstallString -match '\\cvhbs\.exe' })
+    if ($starter.Count -gt 0) {
+        $main = @($starter | Where-Object { $_.Key -eq 'Office14.Click2Run' } | Select-Object -First 1)
+        $command = if ($main.Count -gt 0) { $main[0].UninstallString } else { $starter[0].UninstallString }
+        $label = @($starter | Where-Object { $_.Key -ne 'Office14.Click2Run' } | Select-Object -First 1 | ForEach-Object { $_.Name })
+        $items += [pscustomobject]@{ Kind = 'Starter2010'; Name = $(if ($label.Count -gt 0) { $label[0] } else { 'Office Starter 2010' }); UninstallString = $command }
+    }
+    foreach ($entry in @($entries | Where-Object { $_.Key -match '^\{9[0-9A-F]{7}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{7}FF1CE\}$' -and $_.UninstallString -match '(?i)msiexec|setup\.exe' -and $_.UninstallString -notmatch '\\cvhbs\.exe' })) {
+        $items += [pscustomobject]@{ Kind = 'Msi'; Name = $entry.Name; UninstallString = $entry.UninstallString }
+    }
+    $c2r = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+    if ($null -ne $c2r -and @($c2r.PSObject.Properties.Name) -contains 'ProductReleaseIds') {
+        $ids = @(([string]$c2r.ProductReleaseIds -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne 'Standard2024Volume' })
+        if ($ids.Count -gt 0) { $items += [pscustomobject]@{ Kind = 'ClickToRun'; Name = 'Office Démarrer en un clic (' + ($ids -join ', ') + ')'; UninstallString = '' } }
+    }
+    return @($items)
+}
+
+function Get-GenesisLegacyOfficeLabel {
+    param([AllowEmptyCollection()][object[]]$Items = @())
+    # Libellé court pour la checklist : « Microsoft Office Starter 2010 - Français » devient « Office Starter 2010 ».
+    return ((@($Items) | ForEach-Object { ([string]$_.Name -replace '^Microsoft\s+', '' -replace '\s+-\s+[^-]+$', '').Trim() } | Select-Object -Unique) -join ', ')
+}
+
+function Remove-GenesisOfficeStarter2010 {
+    param([Parameter(Mandatory)]$Item)
+    # Désinstalleur propre à Starter 2010 (virtualisation App-V) : "...\cvhbs.exe" /removeall.
+    if ($Item.UninstallString -notmatch '^\s*"?(?<exe>[^"]*\\cvhbs\.exe)"?\s*(?<args>.*)$') { throw 'Désinstalleur Office Starter 2010 introuvable.' }
+    $exe = [IO.Path]::GetFullPath($Matches.exe)
+    $expected = Join-Path ([Environment]::GetFolderPath('CommonProgramFilesX86')) 'microsoft shared\virtualization handler\cvhbs.exe'
+    if ($exe -ne [IO.Path]::GetFullPath($expected) -or -not (Test-Path -LiteralPath $exe)) { throw 'Désinstalleur Office Starter 2010 inattendu ; suppression non lancée.' }
+    Assert-GenesisMicrosoftSignature -Path $exe
+    # Le désinstalleur demande une confirmation, puis reste parfois ouvert sans fenêtre une fois le travail fait :
+    # la fin est constatée par la disparition de Starter et de ses services, puis le processus resté ouvert est fermé.
+    $process = Start-Process -FilePath $exe -ArgumentList '/removeall' -PassThru -ErrorAction Stop
+    $deadline = [datetime]::UtcNow.AddHours(1)
+    $removedSince = $null
+    while (-not $process.HasExited -and [datetime]::UtcNow -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $gone = (@(Get-GenesisLegacyOffice | Where-Object Kind -eq 'Starter2010').Count -eq 0) -and
+            (@(Get-Service -Name 'cvhsvc', 'sftvsa', 'sftlist' -ErrorAction SilentlyContinue).Count -eq 0)
+        if (-not $gone) { $removedSince = $null; continue }
+        if ($null -eq $removedSince) { $removedSince = [datetime]::UtcNow }
+        if (([datetime]::UtcNow - $removedSince).TotalSeconds -ge 30) {
+            Get-Process -Name 'cvhbs' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            break
+        }
+    }
+    if (-not $process.HasExited -and [datetime]::UtcNow -ge $deadline) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw 'Suppression d''Office Starter 2010 trop longue ; vérifier la fenêtre du désinstalleur puis reprendre.'
+    }
+    if (@(Get-GenesisLegacyOffice | Where-Object Kind -eq 'Starter2010').Count -gt 0) {
+        throw 'Office Starter 2010 est toujours présent (suppression refusée ou annulée).'
+    }
+    Remove-GenesisOfficeStarterShortcut
+}
+
+function Remove-GenesisOfficeStarterShortcut {
+    # Raccourcis « Word/Excel Starter 2010 » devenus morts : ils lançaient CVH.EXE, supprimé avec Starter.
+    $folders = @([Environment]::GetFolderPath('CommonDesktopDirectory'), [Environment]::GetFolderPath('CommonPrograms'), [Environment]::GetFolderPath('DesktopDirectory'), [Environment]::GetFolderPath('Programs'))
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($folder in @($folders | Where-Object { $_ -and (Test-Path -LiteralPath $_) })) {
+        foreach ($link in @(Get-ChildItem -LiteralPath $folder -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue)) {
+            $target = try { [string]$shell.CreateShortcut($link.FullName).TargetPath } catch { '' }
+            if ($target -match '\\Virtualization Handler\\CVH\.EXE$') { Remove-Item -LiteralPath $link.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
 function Install-GenesisOffice2024 {
-    param([Parameter(Mandatory)][string]$RunDirectory)
+    param([Parameter(Mandatory)][string]$RunDirectory, [string]$LegacyChoice)
     $existing = @(Get-GenesisOfficeInstallationStatus)
     if ($existing.Count -eq 4) { return [pscustomobject]@{ Status = 'Completed'; Percent = 100; Message = 'Office Word, Excel, PowerPoint et Outlook classique est déjà installé.' } }
+    $legacy = @(Get-GenesisLegacyOffice)
+    if ($legacy.Count -gt 0) {
+        $legacyLabel = Get-GenesisLegacyOfficeLabel -Items $legacy
+        if ($LegacyChoice -notin @('RemoveLegacy', 'KeepLegacy')) {
+            $LegacyChoice = Read-GenesisSoftwareChoice -Prompt ("Ancien Office détecté : {0}. [1] Le supprimer puis installer Office 2024, [0] Le conserver (Office 2024 non installé)" -f $legacyLabel) -Choices @{ '1' = 'RemoveLegacy'; '0' = 'KeepLegacy' }
+        }
+        if ($LegacyChoice -ne 'RemoveLegacy') {
+            return [pscustomobject]@{ Status = 'NeedsAttention'; Percent = 0; Message = ('Ancien Office conservé ({0}) : Office 2024 non installé, les deux ne cohabitent pas.' -f $legacyLabel) }
+        }
+        foreach ($item in @($legacy | Where-Object Kind -eq 'Starter2010')) {
+            Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'office-2024' -Percent 5 -Message ('Suppression de l''ancien Office : ' + $item.Name)
+            Remove-GenesisOfficeStarter2010 -Item $item
+        }
+    }
     $softwareDirectory = Get-GenesisSoftwareDirectory -RunDirectory $RunDirectory
     $toolPath = Join-Path $softwareDirectory 'officedeploymenttool.exe'
     $download = Save-GenesisDownload -Uri ([uri](Get-GenesisOfficeDeploymentToolUri)) -Path $toolPath
@@ -3054,8 +3172,18 @@ function Install-GenesisOffice2024 {
     $setupPath = Join-Path $toolDirectory 'setup.exe'
     Assert-GenesisMicrosoftSignature -Path $setupPath
     $edition = if ([Environment]::Is64BitOperatingSystem) { '64' } else { '32' }
+    if (@($legacy | Where-Object Kind -eq 'ClickToRun').Count -gt 0) {
+        # Un Office Démarrer en un clic d'un autre canal bloque l'installation : ODT le désinstalle d'abord.
+        Set-GenesisStepProgress -RunDirectory $RunDirectory -StepId 'office-2024' -Percent 35 -Message 'Suppression de l''Office Démarrer en un clic existant'
+        $removePath = Join-Path $softwareDirectory 'office-remove.xml'
+        [IO.File]::WriteAllText($removePath, '<Configuration><Remove All="TRUE" /><Display Level="Full" AcceptEULA="TRUE" /></Configuration>', (New-Object Text.UTF8Encoding($false)))
+        $removal = Invoke-GenesisNativeCommand -FilePath $setupPath -Arguments ('/configure "{0}"' -f $removePath) -WorkingDirectory $toolDirectory -TimeoutSeconds 3600
+        if ($removal.ExitCode -notin @(0, 3010, 1641)) { throw "Suppression de l'ancien Office impossible (code $($removal.ExitCode))." }
+    }
+    # Les Office MSI 2007-2016 sont retirés par ODT pendant l'installation.
+    $removeMsi = if (@($legacy | Where-Object Kind -eq 'Msi').Count -gt 0) { "`n  <RemoveMSI />" } else { '' }
     $configuration = @"
-<Configuration>
+<Configuration>$removeMsi
   <Add OfficeClientEdition="$edition" Channel="PerpetualVL2024">
     <Product ID="Standard2024Volume"><Language ID="fr-fr" /></Product>
   </Add>
@@ -4186,7 +4314,7 @@ function Invoke-GenesisCustomization {
         'time-sync' { return Set-GenesisWindowsTime -RunDirectory $RunDirectory }
         'power-ac' { return Set-GenesisPowerAc -RunDirectory $RunDirectory }
         'local-user' { return New-GenesisLocalUser -RunDirectory $RunDirectory }
-        'office-2024' { return Install-GenesisOffice2024 -RunDirectory $RunDirectory }
+        'office-2024' { return Install-GenesisOffice2024 -RunDirectory $RunDirectory -LegacyChoice (Get-GenesisChoiceValue -Choices $Choices -Name 'office-2024') }
         'browser' { return Install-GenesisBrowser -RunDirectory $RunDirectory -Choice (Get-GenesisChoiceValue -Choices $Choices -Name 'browser') }
         'pdf-reader' { return Install-GenesisPdfReader -RunDirectory $RunDirectory -Choice (Get-GenesisChoiceValue -Choices $Choices -Name 'pdf-reader') }
         'netbird' { return Install-GenesisNetBird -RunDirectory $RunDirectory }

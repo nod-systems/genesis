@@ -902,6 +902,48 @@ Describe 'Reprise de Windows Update apres redemarrage' {
         }
     }
 
+    It 'detecte Office Starter 2010, les Office MSI et les Office Demarrer en un clic anciens' {
+        InModuleScope Genesis {
+            Mock Get-GenesisUninstallEntry {
+                [pscustomobject]@{ Key = 'Office14.Click2Run'; Name = 'Microsoft Office Démarrer en un clic 2010'; Version = '14.0'; UninstallString = '"C:\PROGRA~2\COMMON~1\MICROS~1\VIRTUA~1\CVHBS.EXE" /removeall'; SystemComponent = $false }
+                [pscustomobject]@{ Key = '{90140011-0066-040C-0000-0000000FF1CE}'; Name = 'Microsoft Office Starter 2010 - Français'; Version = '14.0'; UninstallString = 'C:\Program Files (x86)\Common Files\microsoft shared\virtualization handler\cvhbs.exe /uninstall {90140011-0066-040C-0000-0000000FF1CE}'; SystemComponent = $false }
+                [pscustomobject]@{ Key = '{90140000-006D-040C-1000-0000000FF1CE}'; Name = 'Microsoft Office Démarrer en un clic 2010'; Version = '14.0'; UninstallString = 'MsiExec.exe /I{90140000-006D-040C-1000-0000000FF1CE}'; SystemComponent = $true }
+                [pscustomobject]@{ Key = '{90160000-0011-0000-1000-0000000FF1CE}'; Name = 'Microsoft Office Professionnel Plus 2016'; Version = '16.0'; UninstallString = 'MsiExec.exe /X{90160000-0011-0000-1000-0000000FF1CE}'; SystemComponent = $false }
+                [pscustomobject]@{ Key = 'Mozilla Firefox'; Name = 'Mozilla Firefox'; Version = '140'; UninstallString = 'helper.exe'; SystemComponent = $false }
+            }
+            Mock Get-ItemProperty { [pscustomobject]@{ ProductReleaseIds = 'O365HomePremRetail,Standard2024Volume' } } -ParameterFilter { $LiteralPath -like '*ClickToRun\Configuration' }
+            $items = @(Get-GenesisLegacyOffice)
+            @($items | Where-Object Kind -eq 'Starter2010').Count | Should -Be 1
+            @($items | Where-Object Kind -eq 'Starter2010')[0].UninstallString | Should -Match '/removeall'
+            @($items | Where-Object Kind -eq 'Starter2010')[0].Name | Should -Be 'Microsoft Office Starter 2010 - Français'
+            @($items | Where-Object Kind -eq 'Msi').Name | Should -Be 'Microsoft Office Professionnel Plus 2016'
+            @($items | Where-Object Kind -eq 'ClickToRun').Name | Should -Match 'O365HomePremRetail'
+            @($items | Where-Object Kind -eq 'ClickToRun').Name | Should -Not -Match 'Standard2024Volume'
+        }
+    }
+
+    It 'conserve l ancien Office sans installer Office 2024 si le technicien le choisit' {
+        InModuleScope Genesis {
+            Mock Get-GenesisOfficeInstallationStatus { @() }
+            Mock Get-GenesisLegacyOffice { @([pscustomobject]@{ Kind = 'Starter2010'; Name = 'Office Starter 2010'; UninstallString = 'x' }) }
+            Mock Remove-GenesisOfficeStarter2010 {}
+            Mock Save-GenesisDownload { throw 'ne doit pas telecharger' }
+            $result = Install-GenesisOffice2024 -RunDirectory $TestDrive -LegacyChoice 'KeepLegacy'
+            $result.Status | Should -Be 'NeedsAttention'
+            $result.Message | Should -Match 'Office Starter 2010'
+            Should -Invoke Remove-GenesisOfficeStarter2010 -Exactly -Times 0
+            { Assert-GenesisChoice -Choices @{ 'office-2024' = 'RemoveLegacy' } } | Should -Not -Throw
+            { Assert-GenesisChoice -Choices @{ 'office-2024' = 'Autre' } } | Should -Throw
+        }
+    }
+
+    It 'refuse un desinstalleur Office Starter 2010 hors de son emplacement Microsoft' {
+        InModuleScope Genesis {
+            Mock Invoke-GenesisNativeCommand { throw 'ne doit pas executer' }
+            { Remove-GenesisOfficeStarter2010 -Item ([pscustomobject]@{ UninstallString = '"C:\Temp\cvhbs.exe" /removeall' }) } | Should -Throw '*inattendu*'
+        }
+    }
+
     It 'place Windows Update et la mise a niveau en dernier' {
         InModuleScope Genesis {
             $ordered = @(Get-GenesisStepOrder -Steps @('windows-feature-update', 'windows-update', 'explorer-home', 'power-ac'))

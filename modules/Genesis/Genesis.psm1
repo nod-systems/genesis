@@ -1077,6 +1077,7 @@ function Assert-GenesisChoice {
     $allowed = @{
         browser = @('Chrome', 'Firefox')
         'pdf-reader' = @('Acrobat', 'SumatraPDF', 'PDFCraft')
+        'office-2024' = @('RemoveLegacy', 'KeepLegacy')
     }
     $result = [ordered]@{}
     if ($null -eq $Choices) { return $result }
@@ -1295,6 +1296,16 @@ function Show-GenesisTaskChecklist {
             [pscustomobject]@{ Id = 'Acrobat'; Label = 'Adobe Acrobat Reader' }
         )
     }
+    # Choix proposé seulement si un ancien Office est présent : il doit être supprimé avant Office 2024.
+    # @(...) autour du if : un seul résultat resterait sinon un objet simple, sans Count en mode strict.
+    $legacyOffice = @(if (@($steps | ForEach-Object { $_.Id }) -contains 'office-2024') { Get-GenesisLegacyOffice })
+    if ($legacyOffice.Count -gt 0) {
+        $legacyLabel = Get-GenesisLegacyOfficeLabel -Items $legacyOffice
+        $radioDefinitions['office-2024'] = @(
+            [pscustomobject]@{ Id = 'RemoveLegacy'; Label = ('Supprimer {0} puis installer 2024' -f $legacyLabel) }
+            [pscustomobject]@{ Id = 'KeepLegacy'; Label = 'Conserver l''ancien Office (2024 non installé)' }
+        )
+    }
     $rows = @()
     foreach ($step in $steps) {
         $rows += ,([pscustomobject]@{ Kind = 'Step'; Id = $step.Id; ParentId = ''; Name = $step.Name })
@@ -1309,6 +1320,7 @@ function Show-GenesisTaskChecklist {
     $selectedChoices = [ordered]@{}
     if ($checked.ContainsKey('browser')) { $selectedChoices.browser = 'Chrome' }
     if ($checked.ContainsKey('pdf-reader')) { $selectedChoices.'pdf-reader' = 'Acrobat' }
+    if ($radioDefinitions.ContainsKey('office-2024') -and $checked['office-2024']) { $selectedChoices.'office-2024' = 'RemoveLegacy' }
     $cursor = 0
     $cursorWasVisible = $true
     try {
@@ -1318,7 +1330,7 @@ function Show-GenesisTaskChecklist {
             Write-GenesisBanner
             Write-Host 'Sélection des opérations à exécuter' -ForegroundColor Cyan
             Write-Host 'Flèches haut/bas : déplacer   Espace : cocher/décocher   Entrée : lancer   Échap : annuler' -ForegroundColor DarkGray
-            Write-Host 'Les choix indentés sont exclusifs : un seul navigateur et un seul lecteur PDF.' -ForegroundColor DarkGray
+            Write-Host 'Les choix indentés sont exclusifs : un seul choix par opération.' -ForegroundColor DarkGray
             if ($completion.ContainsKey('windows-update') -and -not [string]::IsNullOrWhiteSpace([string]$completion['windows-update'].CurrentVersion)) {
                 $updateStatus = $completion['windows-update']
                 Write-Host ('Windows actuel  : ' + $updateStatus.CurrentVersion) -ForegroundColor Cyan
@@ -1348,6 +1360,7 @@ function Show-GenesisTaskChecklist {
             $choiceSummary = @()
             if ($selectedChoices.Contains('browser')) { $choiceSummary += 'Navigateur=' + $selectedChoices.browser }
             if ($selectedChoices.Contains('pdf-reader')) { $choiceSummary += 'PDF=' + $selectedChoices.'pdf-reader' }
+            if ($selectedChoices.Contains('office-2024')) { $choiceSummary += $(if ($selectedChoices.'office-2024' -eq 'RemoveLegacy') { 'Ancien Office=supprimé' } else { 'Ancien Office=conservé' }) }
             $summary = if ($choiceSummary.Count -gt 0) { ' | ' + ($choiceSummary -join ' | ') } else { '' }
             Write-Host ("{0}/{1} opérations sélectionnées{2}" -f @($checked.Values | Where-Object { $_ }).Count, $steps.Count, $summary) -ForegroundColor Cyan
             $key = [Console]::ReadKey($true)

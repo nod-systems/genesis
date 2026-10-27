@@ -1,5 +1,14 @@
 # Historique des versions
 
+## Non publié
+
+- Office 2024 : un ancien Office (Starter 2010 « Démarrer en un clic », MSI
+  2007-2016, Microsoft 365 ou 2016-2021 Démarrer en un clic) est détecté ; la
+  checklist propose de le supprimer avant l'installation (choix par défaut) ou
+  de le conserver, sans installer Office 2024.
+- Tableau de progression : les barres de progression des cmdlets ne s'affichent
+  plus par-dessus, et le tableau est redessiné après chaque action.
+
 ## 1.1.0
 
 - Nouvelle opération **Capture FOG** (`fog-capture`), décochée par défaut :

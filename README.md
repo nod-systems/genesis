@@ -57,7 +57,7 @@ consulter un plan sans appliquer de réglage :
 | Barre à gauche | Aligner la barre des tâches à gauche et retirer les épingles Edge et Microsoft Store ; Reverse rétablit l'alignement |
 | Menu Démarrer | Désinstaller Outlook (new), Xbox, Solitaire, WhatsApp et LinkedIn et les retirer des nouveaux comptes ; non réversible |
 | Heure | Synchroniser Windows Time en respectant le serveur horaire et les paramètres de domaine existants |
-| Office LTSC 2024 | Récupérer ODT depuis Microsoft, vérifier ses signatures et installer Standard 2024 en français depuis le CDN Microsoft ; aucune clé ni activation intégrée |
+| Office LTSC 2024 | Récupérer ODT depuis Microsoft, vérifier ses signatures et installer Standard 2024 en français depuis le CDN Microsoft ; aucune clé ni activation intégrée. Un ancien Office (Starter 2010, MSI 2007-2016, Démarrer en un clic) est détecté et la checklist propose de le supprimer avant l'installation |
 | Navigateur | Installer Chrome ou Firefox depuis leurs sources officielles et préparer l'association par défaut |
 | PDF | Installer Acrobat Reader, SumatraPDF ou PDFCraft et préparer l'association par défaut |
 | Outlook classique | Proposer le réglage AutoDiscover qui exclut le point de terminaison Microsoft 365 |
