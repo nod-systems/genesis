@@ -1,6 +1,6 @@
 # Historique des versions
 
-## Non publié
+## 1.2.0
 
 - Office 2024 : un ancien Office (Starter 2010 « Démarrer en un clic », MSI
   2007-2016, Microsoft 365 ou 2016-2021 Démarrer en un clic) est détecté ; la
@@ -8,6 +8,11 @@
   de le conserver, sans installer Office 2024.
 - Tableau de progression : les barres de progression des cmdlets ne s'affichent
   plus par-dessus, et le tableau est redessiné après chaque action.
+
+### À savoir pour la mise à jour
+
+Une préparation faite avec la 1.1.0 ne peut pas être reprise ni restaurée avec
+la 1.2.0. Terminer ou restaurer les préparations en cours avant de mettre à jour.
 
 ## 1.1.0
 

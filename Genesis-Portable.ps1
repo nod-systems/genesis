@@ -42,7 +42,7 @@ $script:GenesisEmbeddedProfiles = @{
 }
 
 Set-StrictMode -Version Latest
-$script:GenesisVersion = '1.1.0'
+$script:GenesisVersion = '1.2.0'
 
 function Get-GenesisStepCatalog {
     [CmdletBinding()]

@@ -2,7 +2,7 @@
 
 Outil PowerShell de préparation Windows, avec menu de sélection, progression,
 inventaire local, sauvegardes et retour arrière des réglages compatibles.
-Version actuelle : **1.1.0** ([historique des versions](CHANGELOG.md)).
+Version actuelle : **1.2.0** ([historique des versions](CHANGELOG.md)).
 
 ## Démarrer depuis Internet
 

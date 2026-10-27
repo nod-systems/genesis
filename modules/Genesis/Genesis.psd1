@@ -1,6 +1,6 @@
 ﻿@{
     RootModule = 'Genesis.psm1'
-    ModuleVersion = '1.1.0'
+    ModuleVersion = '1.2.0'
     GUID = '33d2e2d1-4f1b-4526-882c-cb90642ff40e'
     Author = 'Genesis contributors'
     Description = 'Socle de preparation Windows Genesis pour les techniciens MSP.'
